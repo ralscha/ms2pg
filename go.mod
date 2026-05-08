@@ -3,7 +3,7 @@ module pgloader-go
 go 1.26.2
 
 require (
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/microsoft/go-mssqldb v1.8.2
 	github.com/testcontainers/testcontainers-go v0.39.0
 )
