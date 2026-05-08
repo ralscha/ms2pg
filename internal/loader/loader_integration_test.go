@@ -167,7 +167,7 @@ func TestRunnerAppliesSchemaAndTableFilters(t *testing.T) {
 			SourceDSN:      sourceDSN,
 			TargetDSN:      targetDSN,
 			IncludeSchemas: []string{"dbo", "reporting"},
-			IncludeTables:  []string{"users", "reporting.user_names", "reporting.user_labels"},
+			IncludeTables:  []string{"users", "reporting.user_names", "reporting.user_labels", "reporting.user_metrics"},
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -807,7 +807,7 @@ func assertFilteredIncludedIndex(ctx context.Context, t *testing.T, pool *pgxpoo
 	}
 
 	wants := []string{
-		`("name")`,
+		`(name)`,
 		`INCLUDE (city)`,
 		`WHERE (city IS NOT NULL)`,
 	}
