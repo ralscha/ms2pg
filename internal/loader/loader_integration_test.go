@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/microsoft/go-mssqldb"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -468,6 +469,19 @@ func startPostgresContainer(ctx context.Context, t *testing.T) testcontainers.Co
 	t.Cleanup(func() {
 		terminateContainer(context.Background(), t, container)
 	})
+
+	dsn := buildPostgresDSN(t, ctx, container, postgresDB)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL connection: %v", err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	if err := waitForPing(ctx, db.PingContext); err != nil {
+		t.Fatalf("ping PostgreSQL: %v", err)
+	}
 
 	return container
 }
