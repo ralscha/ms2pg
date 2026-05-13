@@ -1,0 +1,77 @@
+version: "3"
+
+
+tasks:
+
+  default:
+    desc: List all tasks
+    cmds:
+      - task --list
+
+  format:
+    desc: Format all Go source files
+    cmds:
+      - go fix ./...
+      - go fmt ./...
+  test:
+    desc: Run all Go tests
+    cmds:
+      - go test -v ./...
+
+  lint:
+    desc: Run golangci-lint in a Docker container
+    cmds:
+      - docker run --rm -v {{toSlash .ROOT_DIR}}:/app -w /app golangci/golangci-lint:v2.12.2 golangci-lint run -v --timeout 5m
+
+  tag:
+    desc: Create a local git tag for a release
+    summary: |
+      Create a local git tag.
+
+      Run with `task --interactive tag` to be prompted for TAG,
+      or pass it explicitly with `task tag TAG=v1.0.0`.
+    requires:
+      vars: [TAG]
+    preconditions:
+      - sh: 'case "{{.TAG}}" in v*) exit 0 ;; *) exit 1 ;; esac'
+        msg: TAG must start with v, for example v1.0.0
+      - sh: 'if git rev-parse -q --verify "refs/tags/{{.TAG}}" >/dev/null 2>&1; then exit 1; fi; exit 0'
+        msg: Tag already exists locally
+    cmds:
+      - git tag {{.TAG}}
+
+  push-tag:
+    desc: Push an existing git tag to GitHub
+    summary: |
+      Push a git tag to the origin remote.
+
+      Run with `task --interactive push-tag` to be prompted for TAG,
+      or pass it explicitly with `task push-tag TAG=v1.0.0`.
+    requires:
+      vars: [TAG]
+    preconditions:
+      - sh: 'case "{{.TAG}}" in v*) exit 0 ;; *) exit 1 ;; esac'
+        msg: TAG must start with v, for example v1.0.0
+      - sh: 'if git rev-parse -q --verify "refs/tags/{{.TAG}}" >/dev/null 2>&1; then exit 0; else exit 1; fi'
+        msg: Tag does not exist locally. Run `task tag TAG=v1.0.0` first.
+    cmds:
+      - git push origin {{.TAG}}
+
+  release-tag:
+    desc: Create and push a release tag to GitHub
+    summary: |
+      Create a local git tag and push it to the origin remote.
+
+      Run with `task --interactive release-tag` to be prompted for TAG,
+      or pass it explicitly with `task release-tag TAG=v1.0.0`.
+    requires:
+      vars: [TAG]
+    preconditions:
+      - sh: 'case "{{.TAG}}" in v*) exit 0 ;; *) exit 1 ;; esac'
+        msg: TAG must start with v, for example v1.0.0
+      - sh: 'if git rev-parse -q --verify "refs/tags/{{.TAG}}" >/dev/null 2>&1; then exit 1; fi; exit 0'
+        msg: Tag already exists locally
+    cmds:
+      - git tag {{.TAG}}
+      - git push origin {{.TAG}}
+
