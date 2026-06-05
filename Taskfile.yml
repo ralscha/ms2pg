@@ -14,7 +14,12 @@ tasks:
       - go fix ./...
       - go fmt ./...
   test:
-    desc: Run all Go tests
+    desc: Run fast Go tests
+    cmds:
+      - go test -short -v ./...
+
+  test-integration:
+    desc: Run all Go tests, including Docker-backed integration tests
     cmds:
       - go test -v ./...
 

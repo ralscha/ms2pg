@@ -51,8 +51,15 @@ View, default-expression, and check-constraint translation is selective and base
 - `LEN()`
 - `DATALENGTH()`
 - `CHARINDEX()`
-- `DATEADD(day, n, ...)`
-- `DATEDIFF(day, start, end)`
+- `DATEADD()` for year, quarter, month, day, week, hour, minute, second, and millisecond units
+- `DATEDIFF()` for year, quarter, month, day, week, hour, minute, second, and millisecond units
+- `IIF()`
+- `STUFF()`
+- `REPLICATE()`
+- `SPACE()`
+- safe two-argument `CONVERT()` forms
+- `CAST()` from common MSSQL-specific types
+- single-argument `LOG()`
 
 If a source definition falls outside the supported translation rules, ms2pg returns an explicit error describing the unsupported token or expression.
 
@@ -71,10 +78,31 @@ Foreign keys that point to tables outside the selected migration set are skipped
 
 ## Requirements
 
-- Go 1.26+
+- Go 1.26.4+
 - access to a SQL Server source database
 - access to a PostgreSQL target database
 - Docker, if you want to run the container-backed integration tests
+
+## Testing
+
+Fast tests:
+
+```sh
+go test -short ./...
+```
+
+Full tests, including Docker-backed SQL Server and PostgreSQL integration tests:
+
+```sh
+go test ./...
+```
+
+With Task:
+
+```sh
+task test
+task test-integration
+```
 
 ## Usage
 

@@ -526,7 +526,7 @@ func normalizeReferentialAction(rule string) string {
 }
 
 func validateViewDefinition(definition string) error {
-	upper := strings.ToUpper(definition)
+	upper := strings.ToUpper(sqlForValidation(definition))
 	unsupported := []string{
 		"TOP ",
 		"TOP(",
@@ -567,8 +567,9 @@ func validateUniqueConstraint(uniqueConstraint *catalog.UniqueConstraint) error 
 
 func validateCheckConstraintDefinition(definition string) error {
 	if !isPortableCheckConstraintDefinition(definition) {
+		upper := strings.ToUpper(sqlForValidation(definition))
 		for _, token := range []string{"TRY_CONVERT(", "TRY_CAST(", "CONVERT(", "CROSS APPLY", "OUTER APPLY", "TOP ", "TOP("} {
-			if strings.Contains(strings.ToUpper(definition), token) {
+			if strings.Contains(upper, token) {
 				return fmt.Errorf("%w: contains %q", errUnsupportedCheckConstraintDefinition, token)
 			}
 		}
@@ -579,8 +580,9 @@ func validateCheckConstraintDefinition(definition string) error {
 
 func validateDefaultConstraintDefinition(definition string) error {
 	if !isPortableDefaultConstraintDefinition(definition) {
+		upper := strings.ToUpper(sqlForValidation(definition))
 		for _, token := range []string{"TRY_CONVERT(", "TRY_CAST(", "CONVERT("} {
-			if strings.Contains(strings.ToUpper(definition), token) {
+			if strings.Contains(upper, token) {
 				return fmt.Errorf("%w: contains %q", errUnsupportedDefaultConstraintDefinition, token)
 			}
 		}
@@ -808,7 +810,7 @@ func normalizeIndexPredicate(predicate string) (string, bool) {
 }
 
 func isPortableIndexPredicate(predicate string) bool {
-	upper := strings.ToUpper(predicate)
+	upper := strings.ToUpper(sqlForValidation(predicate))
 	unsupported := []string{
 		"TOP ",
 		"TOP(",
@@ -871,7 +873,7 @@ func isPortableIndexPredicate(predicate string) bool {
 }
 
 func isPortableCheckConstraintDefinition(definition string) bool {
-	upper := strings.ToUpper(definition)
+	upper := strings.ToUpper(sqlForValidation(definition))
 	unsupported := []string{
 		"TOP ",
 		"TOP(",
@@ -932,7 +934,7 @@ func isPortableCheckConstraintDefinition(definition string) bool {
 }
 
 func isPortableDefaultConstraintDefinition(definition string) bool {
-	upper := strings.ToUpper(definition)
+	upper := strings.ToUpper(sqlForValidation(definition))
 	unsupported := []string{
 		"TRY_CONVERT(",
 		"TRY_CAST(",
@@ -986,6 +988,34 @@ func isPortableDefaultConstraintDefinition(definition string) bool {
 	}
 
 	return true
+}
+
+func sqlForValidation(sql string) string {
+	var builder strings.Builder
+	builder.Grow(len(sql))
+
+	inString := false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		if ch != '\'' {
+			if inString {
+				builder.WriteByte(' ')
+			} else {
+				builder.WriteByte(ch)
+			}
+			continue
+		}
+
+		builder.WriteByte(' ')
+		if inString && i+1 < len(sql) && sql[i+1] == '\'' {
+			builder.WriteByte(' ')
+			i++
+			continue
+		}
+		inString = !inString
+	}
+
+	return builder.String()
 }
 
 func quoteIdentifier(identifier string) string {

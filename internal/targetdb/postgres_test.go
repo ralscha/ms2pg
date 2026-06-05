@@ -106,6 +106,22 @@ func TestRenderCreateViewRejectsUnsupportedTSQL(t *testing.T) {
 	}
 }
 
+func TestRenderCreateViewAllowsUnsupportedTokensInStringLiterals(t *testing.T) {
+	view := &catalog.View{
+		Schema:     "reporting",
+		Name:       "literal_tokens",
+		Definition: `CREATE VIEW reporting.literal_tokens AS SELECT 'TOP TRY_CONVERT(' AS label`,
+	}
+
+	statement, err := renderCreateView(view)
+	if err != nil {
+		t.Fatalf("renderCreateView returned error: %v", err)
+	}
+	if !strings.Contains(statement, `'TOP TRY_CONVERT(' AS label`) {
+		t.Fatalf("statement %q does not contain literal token text", statement)
+	}
+}
+
 func TestRenderCreateIndexIncludesUniquenessAndColumns(t *testing.T) {
 	table := &catalog.Table{Schema: "dbo", Name: "users"}
 	index := &catalog.Index{Name: "idx_users_email", Unique: true, Columns: []string{"email", "city"}}
@@ -274,6 +290,23 @@ func TestRenderCreateCheckConstraintRejectsConvertWithStyleArg(t *testing.T) {
 	_, err := renderCreateCheckConstraint(table, checkConstraint)
 	if !errors.Is(err, errUnsupportedCheckConstraintDefinition) {
 		t.Fatalf("renderCreateCheckConstraint error = %v, want unsupported check constraint definition", err)
+	}
+}
+
+func TestRenderCreateCheckConstraintAllowsFunctionLikeStringLiterals(t *testing.T) {
+	table := &catalog.Table{Schema: "dbo", Name: "users"}
+	checkConstraint := &catalog.CheckConstraint{
+		Name:       "ck_users_note_literal",
+		Definition: `([note] <> N'TRY_CONVERT(''x'')')`,
+	}
+
+	statement, err := renderCreateCheckConstraint(table, checkConstraint)
+	if err != nil {
+		t.Fatalf("renderCreateCheckConstraint returned error: %v", err)
+	}
+	want := `ALTER TABLE "dbo"."users" ADD CONSTRAINT "ck_users_note_literal" CHECK (("note" <> 'TRY_CONVERT(''x'')'))`
+	if statement != want {
+		t.Fatalf("renderCreateCheckConstraint() = %q, want %q", statement, want)
 	}
 }
 
