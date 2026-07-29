@@ -13,6 +13,12 @@ tasks:
     cmds:
       - go fix ./...
       - go fmt ./...
+
+  build:
+    desc: Build the ms2pg command-line program
+    cmds:
+      - go build -o ms2pg{{exeExt}} .
+
   test:
     desc: Run fast Go tests
     cmds:
