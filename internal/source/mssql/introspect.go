@@ -47,6 +47,7 @@ const primaryKeysQuery = `
 SELECT
 	tc.TABLE_SCHEMA,
 	tc.TABLE_NAME,
+	tc.CONSTRAINT_NAME,
 	kcu.COLUMN_NAME,
 	kcu.ORDINAL_POSITION
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
@@ -78,7 +79,9 @@ SELECT
 	o.name,
 	i.name,
 	c.name,
+	i.type,
 	i.is_unique,
+	i.is_disabled,
 	i.is_primary_key,
 	COALESCE(i.filter_definition, ''),
 	ic.key_ordinal,
@@ -94,40 +97,48 @@ JOIN sys.columns c ON c.object_id = i.object_id
 	AND c.column_id = ic.column_id
 WHERE o.type = 'U'
 	AND i.name IS NOT NULL
+	AND i.is_hypothetical = 0
 	AND i.is_primary_key = 0
 	AND i.is_unique_constraint = 0
 ORDER BY s.name, o.name, i.name, ic.is_included_column, ic.key_ordinal, ic.index_column_id`
 
 const foreignKeysQuery = `
 SELECT
-	REPLACE(kcu1.CONSTRAINT_NAME, '.', '_'),
-	kcu1.TABLE_SCHEMA,
-	kcu1.TABLE_NAME,
-	kcu1.COLUMN_NAME,
-	kcu2.TABLE_SCHEMA,
-	kcu2.TABLE_NAME,
-	kcu2.COLUMN_NAME,
-	rc.UPDATE_RULE,
-	rc.DELETE_RULE,
-	kcu1.ORDINAL_POSITION
-FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
-JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
-	ON kcu1.CONSTRAINT_CATALOG = rc.CONSTRAINT_CATALOG
-	AND kcu1.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
-	AND kcu1.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
-JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
-	ON kcu2.CONSTRAINT_CATALOG = rc.UNIQUE_CONSTRAINT_CATALOG
-	AND kcu2.CONSTRAINT_SCHEMA = rc.UNIQUE_CONSTRAINT_SCHEMA
-	AND kcu2.CONSTRAINT_NAME = rc.UNIQUE_CONSTRAINT_NAME
-WHERE kcu1.ORDINAL_POSITION = kcu2.ORDINAL_POSITION
-ORDER BY kcu1.CONSTRAINT_NAME, kcu1.ORDINAL_POSITION`
+	fk.name,
+	parent_schema.name,
+	parent_table.name,
+	parent_column.name,
+	referenced_schema.name,
+	referenced_table.name,
+	referenced_column.name,
+	fk.update_referential_action_desc,
+	fk.delete_referential_action_desc,
+	fk.is_disabled,
+	fk.is_not_trusted,
+	fkc.constraint_column_id
+FROM sys.foreign_keys fk
+JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+JOIN sys.tables parent_table ON parent_table.object_id = fk.parent_object_id
+JOIN sys.schemas parent_schema ON parent_schema.schema_id = parent_table.schema_id
+JOIN sys.columns parent_column
+	ON parent_column.object_id = fkc.parent_object_id
+	AND parent_column.column_id = fkc.parent_column_id
+JOIN sys.tables referenced_table ON referenced_table.object_id = fk.referenced_object_id
+JOIN sys.schemas referenced_schema ON referenced_schema.schema_id = referenced_table.schema_id
+JOIN sys.columns referenced_column
+	ON referenced_column.object_id = fkc.referenced_object_id
+	AND referenced_column.column_id = fkc.referenced_column_id
+WHERE parent_table.is_ms_shipped = 0
+ORDER BY parent_schema.name, parent_table.name, fk.name, fkc.constraint_column_id`
 
 const checkConstraintsQuery = `
 SELECT
 	s.name,
 	t.name,
 	cc.name,
-	cc.definition
+	cc.definition,
+	cc.is_disabled,
+	cc.is_not_trusted
 FROM sys.check_constraints cc
 JOIN sys.tables t ON t.object_id = cc.parent_object_id
 JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -374,15 +385,17 @@ func (source *Source) loadPrimaryKeys(ctx context.Context, tables map[string]*ca
 	for rows.Next() {
 		var schemaName string
 		var tableName string
+		var constraintName string
 		var columnName string
 		var ordinal int
-		if err := rows.Scan(&schemaName, &tableName, &columnName, &ordinal); err != nil {
+		if err := rows.Scan(&schemaName, &tableName, &constraintName, &columnName, &ordinal); err != nil {
 			return fmt.Errorf("scan primary key metadata: %w", err)
 		}
 		table := tables[tableKey(schemaName, tableName)]
 		if table == nil {
 			continue
 		}
+		table.PrimaryKeyName = constraintName
 		table.PrimaryKey = append(table.PrimaryKey, columnName)
 	}
 
@@ -435,7 +448,9 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 		var tableName string
 		var indexName string
 		var columnName string
+		var sourceType int
 		var unique bool
+		var disabled bool
 		var primaryKey bool
 		var filterDefinition string
 		var keyOrdinal int
@@ -447,7 +462,9 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 			&tableName,
 			&indexName,
 			&columnName,
+			&sourceType,
 			&unique,
+			&disabled,
 			&primaryKey,
 			&filterDefinition,
 			&keyOrdinal,
@@ -470,7 +487,7 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 		mapKey := tableKey(schemaName, tableName) + "." + indexName
 		index := indexMap[mapKey]
 		if index == nil {
-			index = &catalog.Index{Name: indexName, Unique: unique, Predicate: filterDefinition}
+			index = &catalog.Index{Name: indexName, SourceType: sourceType, Disabled: disabled, Unique: unique, Predicate: filterDefinition}
 			indexMap[mapKey] = index
 			table.Indexes = append(table.Indexes, index)
 		}
@@ -585,6 +602,8 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 		var referencedColumn string
 		var updateRule string
 		var deleteRule string
+		var disabled bool
+		var notTrusted bool
 		var ordinal int
 		if err := rows.Scan(
 			&name,
@@ -596,6 +615,8 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 			&referencedColumn,
 			&updateRule,
 			&deleteRule,
+			&disabled,
+			&notTrusted,
 			&ordinal,
 		); err != nil {
 			return fmt.Errorf("scan foreign key metadata: %w", err)
@@ -615,6 +636,8 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 				ReferencedTable:  referencedTable,
 				UpdateRule:       updateRule,
 				DeleteRule:       deleteRule,
+				Disabled:         disabled,
+				NotTrusted:       notTrusted,
 			}
 			foreignKeyMap[mapKey] = foreignKey
 			table.ForeignKeys = append(table.ForeignKeys, foreignKey)
@@ -640,7 +663,9 @@ func (source *Source) loadCheckConstraints(ctx context.Context, tables map[strin
 		var tableName string
 		var name string
 		var definition string
-		if err := rows.Scan(&schemaName, &tableName, &name, &definition); err != nil {
+		var disabled bool
+		var notTrusted bool
+		if err := rows.Scan(&schemaName, &tableName, &name, &definition, &disabled, &notTrusted); err != nil {
 			return fmt.Errorf("scan check constraint metadata: %w", err)
 		}
 
@@ -652,6 +677,8 @@ func (source *Source) loadCheckConstraints(ctx context.Context, tables map[strin
 		table.CheckConstraints = append(table.CheckConstraints, &catalog.CheckConstraint{
 			Name:       name,
 			Definition: definition,
+			Disabled:   disabled,
+			NotTrusted: notTrusted,
 		})
 	}
 
@@ -709,7 +736,7 @@ func selectExpression(column *catalog.Column) string {
 	case "datetime", "datetime2", "smalldatetime":
 		expression = fmt.Sprintf("CONVERT(varchar(30), %s, 126)", name)
 	case "time":
-		expression = fmt.Sprintf("CONVERT(varchar(30), %s, 114)", name)
+		expression = fmt.Sprintf("CONVERT(varchar(30), %s)", name)
 	case "money", "smallmoney":
 		// Cast to decimal so the driver returns an exact decimal string rather
 		// than a float64, preventing floating-point rounding errors.
@@ -718,6 +745,10 @@ func selectExpression(column *catalog.Column) string {
 		// sql_variant can hold any type; cast to nvarchar so the driver always
 		// returns a string, which pgx can reliably copy to a text column.
 		expression = fmt.Sprintf("CAST(%s AS nvarchar(max))", name)
+	case "hierarchyid", "geography", "geometry":
+		// Preserve SQL Server's serialized representation as opaque bytes.
+		// PostgreSQL cannot interpret it without a type-specific conversion.
+		expression = fmt.Sprintf("CONVERT(varbinary(max), %s)", name)
 	default:
 		expression = name
 	}
@@ -749,20 +780,8 @@ func normalizeTemporalValue(column *catalog.Column, value string) (any, bool) {
 		return nil, false
 	}
 
-	switch column.TargetType {
-	case "timestamp":
-		for _, layout := range []string{
-			"2006-01-02T15:04:05.9999999",
-			"2006-01-02T15:04:05.999999",
-			"2006-01-02T15:04:05.999",
-			"2006-01-02T15:04:05",
-		} {
-			parsed, err := time.Parse(layout, trimmed)
-			if err == nil {
-				return parsed, true
-			}
-		}
-	case "timestamptz":
+	switch {
+	case strings.HasPrefix(column.TargetType, "timestamptz"):
 		for _, layout := range []string{
 			"2006-01-02T15:04:05.9999999Z07:00",
 			"2006-01-02T15:04:05.999999Z07:00",
@@ -774,12 +793,24 @@ func normalizeTemporalValue(column *catalog.Column, value string) (any, bool) {
 				return parsed, true
 			}
 		}
-	case "date":
+	case strings.HasPrefix(column.TargetType, "timestamp"):
+		for _, layout := range []string{
+			"2006-01-02T15:04:05.9999999",
+			"2006-01-02T15:04:05.999999",
+			"2006-01-02T15:04:05.999",
+			"2006-01-02T15:04:05",
+		} {
+			parsed, err := time.Parse(layout, trimmed)
+			if err == nil {
+				return parsed, true
+			}
+		}
+	case column.TargetType == "date":
 		parsed, err := time.Parse("2006-01-02", trimmed)
 		if err == nil {
 			return parsed, true
 		}
-	case "time":
+	case strings.HasPrefix(column.TargetType, "time"):
 		normalized := trimmed
 		lastColon := strings.LastIndex(normalized, ":")
 		if lastColon > len("15:04:05")-1 {

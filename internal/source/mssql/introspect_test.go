@@ -26,7 +26,7 @@ func TestSelectExpressionUsesMSSQLTemporalFormatting(t *testing.T) {
 		{
 			name:   "time",
 			column: &catalog.Column{Name: "start_at", SourceType: "time"},
-			want:   "CONVERT(varchar(30), [start_at], 114) AS [start_at]",
+			want:   "CONVERT(varchar(30), [start_at]) AS [start_at]",
 		},
 		{
 			name:   "plain",
@@ -48,6 +48,11 @@ func TestSelectExpressionUsesMSSQLTemporalFormatting(t *testing.T) {
 			column: &catalog.Column{Name: "val", SourceType: "sql_variant"},
 			want:   "CAST([val] AS nvarchar(max)) AS [val]",
 		},
+		{
+			name:   "geometry",
+			column: &catalog.Column{Name: "shape", SourceType: "geometry"},
+			want:   "CONVERT(varbinary(max), [shape]) AS [shape]",
+		},
 	}
 
 	for _, test := range tests {
@@ -67,14 +72,14 @@ func TestNormalizeTemporalValueParsesTemporalTypes(t *testing.T) {
 	}{
 		{
 			name:   "timestamp",
-			column: &catalog.Column{TargetType: "timestamp"},
+			column: &catalog.Column{TargetType: "timestamp(6)"},
 			value:  "2026-05-08T11:12:13.1234567",
 			want:   time.Date(2026, 5, 8, 11, 12, 13, 123456700, time.UTC),
 			wantOK: true,
 		},
 		{
 			name:   "timestamptz",
-			column: &catalog.Column{TargetType: "timestamptz"},
+			column: &catalog.Column{TargetType: "timestamptz(6)"},
 			value:  "2026-05-08T11:12:13.1234567+02:00",
 			want:   time.Date(2026, 5, 8, 11, 12, 13, 123456700, time.FixedZone("", 2*60*60)),
 			wantOK: true,
@@ -88,7 +93,7 @@ func TestNormalizeTemporalValueParsesTemporalTypes(t *testing.T) {
 		},
 		{
 			name:   "time",
-			column: &catalog.Column{TargetType: "time"},
+			column: &catalog.Column{TargetType: "time(6)"},
 			value:  "11:12:13:1234567",
 			want:   "11:12:13.123456",
 			wantOK: true,

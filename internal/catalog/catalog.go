@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"fmt"
 	"path"
 	"slices"
 	"strings"
@@ -27,6 +28,7 @@ type Table struct {
 	Schema             string
 	Name               string
 	Columns            []*Column
+	PrimaryKeyName     string
 	PrimaryKey         []string
 	Indexes            []*Index
 	UniqueConstraints  []*UniqueConstraint
@@ -37,6 +39,8 @@ type Table struct {
 
 type Index struct {
 	Name              string
+	SourceType        int
+	Disabled          bool
 	Columns           []string
 	DescendingColumns []bool
 	IncludedColumns   []string
@@ -52,6 +56,8 @@ type ForeignKey struct {
 	ReferencedColumns []string
 	UpdateRule        string
 	DeleteRule        string
+	Disabled          bool
+	NotTrusted        bool
 }
 
 type UniqueConstraint struct {
@@ -62,6 +68,8 @@ type UniqueConstraint struct {
 type CheckConstraint struct {
 	Name       string
 	Definition string
+	Disabled   bool
+	NotTrusted bool
 }
 
 type DefaultConstraint struct {
@@ -90,6 +98,32 @@ type View struct {
 	Schema     string
 	Name       string
 	Definition string
+}
+
+func (filters Filters) Validate() error {
+	groups := []struct {
+		name     string
+		patterns []string
+	}{
+		{name: "include schema", patterns: filters.IncludeSchemas},
+		{name: "include table", patterns: filters.IncludeTables},
+		{name: "exclude schema", patterns: filters.ExcludeSchemas},
+		{name: "exclude table", patterns: filters.ExcludeTables},
+	}
+
+	for _, group := range groups {
+		for _, pattern := range group.patterns {
+			trimmed := strings.TrimSpace(pattern)
+			if trimmed == "" {
+				return fmt.Errorf("%s filter contains an empty pattern", group.name)
+			}
+			if _, err := path.Match(strings.ToLower(trimmed), "validation"); err != nil {
+				return fmt.Errorf("invalid %s filter %q: %w", group.name, pattern, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (db *Database) SortedSchemas() []*Schema {

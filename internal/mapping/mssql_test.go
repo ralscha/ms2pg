@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"strings"
 	"testing"
 
 	"ms2pg/internal/catalog"
@@ -23,11 +24,11 @@ func TestApplyMapsCommonTypesAndDefaults(t *testing.T) {
 		t.Fatalf("Apply returned error: %v", err)
 	}
 
-	if got := table.Columns[0].TargetType; got != "bigint" {
-		t.Fatalf("identity target type = %q, want bigint", got)
+	if got := table.Columns[0].TargetType; got != "integer" {
+		t.Fatalf("identity target type = %q, want integer", got)
 	}
-	if got := table.Columns[1].TargetType; got != "timestamp" {
-		t.Fatalf("datetime2 target type = %q, want timestamp", got)
+	if got := table.Columns[1].TargetType; got != "timestamp(0)" {
+		t.Fatalf("datetime2 target type = %q, want timestamp(0)", got)
 	}
 	if got := table.Columns[1].Default; got != "CURRENT_TIMESTAMP" {
 		t.Fatalf("datetime2 default = %q, want CURRENT_TIMESTAMP", got)
@@ -90,9 +91,17 @@ func TestMapTypeEdgeCases(t *testing.T) {
 		{catalog.Column{SourceType: "float", Precision: 25}, "double precision"},
 		{catalog.Column{SourceType: "float", Precision: 0}, "double precision"},
 		{catalog.Column{SourceType: "money"}, "numeric(19,4)"},
-		{catalog.Column{SourceType: "smallmoney"}, "numeric(19,4)"},
-		{catalog.Column{SourceType: "int", Identity: true}, "bigint"},
-		{catalog.Column{SourceType: "tinyint", Identity: true}, "bigint"},
+		{catalog.Column{SourceType: "smallmoney"}, "numeric(10,4)"},
+		{catalog.Column{SourceType: "char", Length: 12}, "character(12)"},
+		{catalog.Column{SourceType: "varchar", Length: 200}, "character varying(200)"},
+		{catalog.Column{SourceType: "varchar", Length: -1}, "text"},
+		{catalog.Column{SourceType: "nchar", Length: 24}, "character(12)"},
+		{catalog.Column{SourceType: "nvarchar", Length: 200}, "character varying(100)"},
+		{catalog.Column{SourceType: "datetime2", Scale: 7}, "timestamp(6)"},
+		{catalog.Column{SourceType: "datetimeoffset", Scale: 3}, "timestamptz(3)"},
+		{catalog.Column{SourceType: "time", Scale: 4}, "time(4)"},
+		{catalog.Column{SourceType: "int", Identity: true}, "integer"},
+		{catalog.Column{SourceType: "tinyint", Identity: true}, "smallint"},
 	}
 	for _, tc := range cases {
 		got, err := mapType(&tc.col)
@@ -103,5 +112,25 @@ func TestMapTypeEdgeCases(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("mapType(%+v) = %q, want %q", tc.col, got, tc.want)
 		}
+	}
+}
+
+func TestMapTypeRejectsUnsupportedIdentityType(t *testing.T) {
+	column := &catalog.Column{SourceType: "numeric", Precision: 20, Scale: 0, Identity: true}
+	if _, err := mapType(column); err == nil || !strings.Contains(err.Error(), "unsupported identity source type") {
+		t.Fatalf("mapType() error = %v, want unsupported identity source type", err)
+	}
+}
+
+func TestMapDefaultDoesNotRewriteStringContents(t *testing.T) {
+	input := `(N'GETDATE() [not_an_identifier]')`
+	if got, want := mapDefault(input), `'GETDATE() [not_an_identifier]'`; got != want {
+		t.Fatalf("mapDefault(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestMapDefaultMapsDatetimeOffsetToTimestampWithTimeZone(t *testing.T) {
+	if got, want := mapDefault(`SYSDATETIMEOFFSET()`), `CURRENT_TIMESTAMP`; got != want {
+		t.Fatalf("mapDefault(SYSDATETIMEOFFSET()) = %q, want %q", got, want)
 	}
 }

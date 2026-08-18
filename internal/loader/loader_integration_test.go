@@ -349,8 +349,8 @@ func TestRunnerAppliesExcludeFilters(t *testing.T) {
 	assertTargetViewRows(ctx, t, targetDSN)
 }
 
-func TestRunnerSkipsNonPortableFilteredIndex(t *testing.T) {
-	runSkippedNonPortableFilteredIndexTest(
+func TestRunnerRejectsNonPortableFilteredIndex(t *testing.T) {
+	runRejectedNonPortableFilteredIndexTest(
 		t,
 		"ms2pg_badfilteredindex_convert_it",
 		`CREATE INDEX idx_users_city_convert ON dbo.users (name) WHERE city = CONVERT(nvarchar(100), N'London')`,
@@ -358,8 +358,8 @@ func TestRunnerSkipsNonPortableFilteredIndex(t *testing.T) {
 	)
 }
 
-func TestRunnerSkipsNonPortableDatetimeConvertFilteredIndex(t *testing.T) {
-	runSkippedNonPortableFilteredIndexTest(
+func TestRunnerRejectsNonPortableDatetimeConvertFilteredIndex(t *testing.T) {
+	runRejectedNonPortableFilteredIndexTest(
 		t,
 		"ms2pg_badfilteredindex_datetimeconvert_it",
 		`CREATE INDEX idx_users_created_recent ON dbo.users (name) WHERE created_at >= CONVERT(datetime2, '2000-01-01T00:00:00')`,
@@ -367,8 +367,8 @@ func TestRunnerSkipsNonPortableDatetimeConvertFilteredIndex(t *testing.T) {
 	)
 }
 
-func TestRunnerSkipsNonPortableCastFilteredIndex(t *testing.T) {
-	runSkippedNonPortableFilteredIndexTest(
+func TestRunnerRejectsNonPortableCastFilteredIndex(t *testing.T) {
+	runRejectedNonPortableFilteredIndexTest(
 		t,
 		"ms2pg_badfilteredindex_cast_it",
 		`CREATE INDEX idx_users_city_cast ON dbo.users (name) WHERE city = CAST(N'London' AS nvarchar(100))`,
@@ -376,7 +376,7 @@ func TestRunnerSkipsNonPortableCastFilteredIndex(t *testing.T) {
 	)
 }
 
-func runSkippedNonPortableFilteredIndexTest(t *testing.T, sourceDBName string, createIndexStatement string, indexName string) {
+func runRejectedNonPortableFilteredIndexTest(t *testing.T, sourceDBName string, createIndexStatement string, indexName string) {
 	if testing.Short() {
 		t.Skip("skipping container-backed integration test in short mode")
 	}
@@ -404,14 +404,13 @@ func runSkippedNonPortableFilteredIndexTest(t *testing.T, sourceDBName string, c
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	if err := runner.Run(ctx); err != nil {
-		t.Fatalf("Run returned error: %v", err)
+	err := runner.Run(ctx)
+	if err == nil {
+		t.Fatal("Run returned nil error, want unsupported index failure")
 	}
-
-	assertTargetTableRows(ctx, t, targetDSN)
-	assertTargetIndexes(ctx, t, targetDSN)
-	assertTargetViewRows(ctx, t, targetDSN)
-	assertSkippedIndexAbsent(ctx, t, targetDSN, "dbo", "users", indexName)
+	if !strings.Contains(err.Error(), "unsupported MSSQL index definition") || !strings.Contains(err.Error(), indexName) {
+		t.Fatalf("Run error = %v, want unsupported index %q", err, indexName)
+	}
 }
 
 func startMSSQLContainer(ctx context.Context, t *testing.T) testcontainers.Container {

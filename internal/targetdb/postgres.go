@@ -12,41 +12,118 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ms2pg/internal/catalog"
+	"ms2pg/internal/sqlrewrite"
 )
 
 var errUnsupportedViewDefinition = errors.New("unsupported MSSQL view definition")
+var errUnsupportedIndexDefinition = errors.New("unsupported MSSQL index definition")
+var errUnsupportedConstraintState = errors.New("unsupported MSSQL constraint state")
 var errUnsupportedCheckConstraintDefinition = errors.New("unsupported MSSQL check constraint definition")
 var errUnsupportedDefaultConstraintDefinition = errors.New("unsupported MSSQL default constraint definition")
 var errInvalidUniqueConstraint = errors.New("invalid unique constraint metadata")
 
 var (
-	createViewPattern        = regexp.MustCompile(`(?i)^\s*CREATE\s+VIEW\s+`)
-	bracketIdentifierPattern = regexp.MustCompile(`\[([^\]]+)\]`)
-	setDirectivePattern      = regexp.MustCompile(`(?i)^SET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)\s*;?$`)
-	unicodeStringPattern     = regexp.MustCompile(`(?i)\bN'`)
-	isNullPattern            = regexp.MustCompile(`(?i)\bISNULL\s*\(`)
-	getDatePattern           = regexp.MustCompile(`(?i)\b(GETDATE|SYSDATETIME|CURRENT_TIMESTAMP)\s*\(\s*\)`)
-	getUTCDatePattern        = regexp.MustCompile(`(?i)\b(GETUTCDATE|SYSDATETIMEOFFSET)\s*\(\s*\)`)
-	newIDPattern             = regexp.MustCompile(`(?i)\b(NEWID|NEWSEQUENTIALID)\s*\(\s*\)`)
-	lenPattern               = regexp.MustCompile(`(?i)\bLEN\s*\(`)
-	dataLengthPattern        = regexp.MustCompile(`(?i)\bDATALENGTH\s*\(`)
-	charIndexPattern         = regexp.MustCompile(`(?i)\bCHARINDEX\s*\(\s*([^,]+?)\s*,\s*([^,)]+?)\s*\)`)
-	dateAddPattern           = regexp.MustCompile(`(?i)\bDATEADD\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	dateDiffPattern          = regexp.MustCompile(`(?i)\bDATEDIFF\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	iifPattern               = regexp.MustCompile(`(?i)\bIIF\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	stuffPattern             = regexp.MustCompile(`(?i)\bSTUFF\s*\(\s*([^,]+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^)]+?)\s*\)`)
-	collatePattern           = regexp.MustCompile(`(?i)\bCOLLATE\s+\w+`)
-	replicatePattern         = regexp.MustCompile(`(?i)\bREPLICATE\s*\(`)
-	spacePattern             = regexp.MustCompile(`(?i)\bSPACE\s*\(\s*([^)]+?)\s*\)`)
-	convertSafePattern       = regexp.MustCompile(`(?i)\bCONVERT\s*\(\s*(varchar|nvarchar|nchar|char|text|ntext|uniqueidentifier|sysname|money|smallmoney|integer|int|bigint|smallint|tinyint|float|real|bit|date|datetime2|smalldatetime|datetime|datetimeoffset|numeric|decimal)\s*(?:\(\s*[\d,\s]+\s*\))?\s*,\s*([^,)]+?)\s*\)`)
-	logSingleArgPattern      = regexp.MustCompile(`(?i)\bLOG\s*\(\s*([^,)]+?)\s*\)`)
-	castTypePattern          = regexp.MustCompile(`(?i)\bCAST\s*\(\s*(.+?)\s+AS\s+(datetimeoffset|datetime2|smalldatetime|datetime|smallmoney|money|uniqueidentifier|sysname|nvarchar|nchar|ntext|tinyint|bit)\s*(?:\([^)]*\))?\s*\)`)
-	schemaBindingPattern     = regexp.MustCompile(`(?i)\bWITH\s+SCHEMABINDING\b`)
-	sqlFunctionPattern       = regexp.MustCompile(`(?i)\b([A-Z_][A-Z0-9_]*)\(`)
+	viewHeaderPattern    = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+VIEW\s+(?:(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)\s*\.\s*)?(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)(\s*\([^)]*\))?(?:\s+WITH\s+SCHEMABINDING)?\s+AS\b`)
+	setDirectivePattern  = regexp.MustCompile(`(?i)^SET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)\s*;?$`)
+	isNullPattern        = regexp.MustCompile(`(?i)\bISNULL\s*\(`)
+	getDatePattern       = regexp.MustCompile(`(?i)\b(GETDATE|SYSDATETIME)\b\s*\(\s*\)`)
+	getUTCDatePattern    = regexp.MustCompile(`(?i)\b(GETUTCDATE|SYSUTCDATETIME)\b\s*\(\s*\)`)
+	getOffsetDatePattern = regexp.MustCompile(`(?i)\bSYSDATETIMEOFFSET\b\s*\(\s*\)`)
+	newIDPattern         = regexp.MustCompile(`(?i)\b(NEWID|NEWSEQUENTIALID)\b\s*\(\s*\)`)
+	lenPattern           = regexp.MustCompile(`(?i)\bLEN\s*\(\s*([^)]+?)\s*\)`)
+	dataLengthPattern    = regexp.MustCompile(`(?i)\bDATALENGTH\s*\(`)
+	charIndexPattern     = regexp.MustCompile(`(?i)\bCHARINDEX\s*\(\s*([^,]+?)\s*,\s*([^,)]+?)\s*\)`)
+	dateAddPattern       = regexp.MustCompile(`(?i)\bDATEADD\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
+	dateDiffPattern      = regexp.MustCompile(`(?i)\bDATEDIFF\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
+	iifPattern           = regexp.MustCompile(`(?i)\bIIF\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
+	stuffPattern         = regexp.MustCompile(`(?i)\bSTUFF\s*\(\s*([^,]+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^)]+?)\s*\)`)
+	collatePattern       = regexp.MustCompile(`(?i)\bCOLLATE\s+\w+`)
+	replicatePattern     = regexp.MustCompile(`(?i)\bREPLICATE\s*\(`)
+	spacePattern         = regexp.MustCompile(`(?i)\bSPACE\s*\(\s*([^)]+?)\s*\)`)
+	convertSafePattern   = regexp.MustCompile(`(?i)\bCONVERT\s*\(\s*(varchar|nvarchar|nchar|char|text|ntext|uniqueidentifier|sysname|money|smallmoney|integer|int|bigint|smallint|tinyint|float|real|bit|date|datetime2|smalldatetime|datetime|datetimeoffset|numeric|decimal)\s*(?:\(\s*[\d,\s]+\s*\))?\s*,\s*([^,)]+?)\s*\)`)
+	logSingleArgPattern  = regexp.MustCompile(`(?i)\bLOG\s*\(\s*([^,)]+?)\s*\)`)
+	castTypePattern      = regexp.MustCompile(`(?i)\bCAST\s*\(\s*(.+?)\s+AS\s+(datetimeoffset|datetime2|smalldatetime|datetime|smallmoney|money|uniqueidentifier|sysname|nvarchar|nchar|ntext|tinyint|bit)\s*(?:\([^)]*\))?\s*\)`)
+	sqlFunctionPattern   = regexp.MustCompile(`(?i)\b([A-Z_][A-Z0-9_]*)\(`)
+	hexLiteralPattern    = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
 )
 
 type Target struct {
 	pool *pgxpool.Pool
+}
+
+// Validate checks every definition that can be validated without connecting to
+// PostgreSQL. Running this before target creation avoids leaving a partially
+// migrated database for known unsupported SQL Server constructs.
+func Validate(database *catalog.Database) error {
+	if database == nil {
+		return errors.New("missing source catalog")
+	}
+
+	for schemaName, relations := range targetRelationNames(database) {
+		seen := make(map[string]string)
+		for _, relation := range relations {
+			if previous, exists := seen[relation.name]; exists {
+				return fmt.Errorf("target name collision in schema %s: %s and %s both require relation name %q", schemaName, previous, relation.kind, relation.name)
+			}
+			seen[relation.name] = relation.kind
+		}
+	}
+
+	for _, schema := range database.SortedSchemas() {
+		for _, table := range schema.SortedTables() {
+			for _, index := range table.Indexes {
+				if index.Disabled {
+					return fmt.Errorf("index %s on %s.%s: %w: disabled indexes cannot be preserved", index.Name, table.Schema, table.Name, errUnsupportedIndexDefinition)
+				}
+				if index.SourceType != 0 && index.SourceType != 1 && index.SourceType != 2 {
+					return fmt.Errorf("index %s on %s.%s: %w: SQL Server index type %d is not a rowstore index", index.Name, table.Schema, table.Name, errUnsupportedIndexDefinition, index.SourceType)
+				}
+				if len(index.Columns) == 0 {
+					return fmt.Errorf("index %s on %s.%s: %w: no portable key columns", index.Name, table.Schema, table.Name, errUnsupportedIndexDefinition)
+				}
+				if predicate, ok := normalizeIndexPredicate(index.Predicate); !ok {
+					return fmt.Errorf("index %s on %s.%s: %w: unsupported predicate", index.Name, table.Schema, table.Name, errUnsupportedIndexDefinition)
+				} else if !isPortableIndexPredicate(normalizeBooleanComparisons(table, predicate)) {
+					return fmt.Errorf("index %s on %s.%s: %w: unsupported predicate", index.Name, table.Schema, table.Name, errUnsupportedIndexDefinition)
+				}
+			}
+			for _, uniqueConstraint := range table.UniqueConstraints {
+				if err := validateUniqueConstraint(uniqueConstraint); err != nil {
+					return fmt.Errorf("unique constraint %s on %s.%s: %w", uniqueConstraint.Name, table.Schema, table.Name, err)
+				}
+			}
+			for _, checkConstraint := range table.CheckConstraints {
+				if checkConstraint.Disabled {
+					return fmt.Errorf("check constraint %s on %s.%s: %w: disabled constraints cannot be preserved", checkConstraint.Name, table.Schema, table.Name, errUnsupportedConstraintState)
+				}
+				definition := normalizeBooleanComparisons(table, normalizeSQLExpression(checkConstraint.Definition))
+				if err := validateCheckConstraintDefinition(definition); err != nil {
+					return fmt.Errorf("check constraint %s on %s.%s: %w", checkConstraint.Name, table.Schema, table.Name, err)
+				}
+			}
+			for _, defaultConstraint := range table.DefaultConstraints {
+				definition := normalizeDefaultDefinition(table, defaultConstraint)
+				if err := validateDefaultConstraintDefinition(definition); err != nil {
+					return fmt.Errorf("default constraint %s on %s.%s: %w", defaultConstraint.Name, table.Schema, table.Name, err)
+				}
+			}
+			for _, foreignKey := range table.ForeignKeys {
+				if foreignKey.Disabled {
+					return fmt.Errorf("foreign key %s on %s.%s: %w: disabled constraints cannot be preserved", foreignKey.Name, table.Schema, table.Name, errUnsupportedConstraintState)
+				}
+				if len(foreignKey.Columns) == 0 || len(foreignKey.Columns) != len(foreignKey.ReferencedColumns) {
+					return fmt.Errorf("foreign key %s on %s.%s: invalid column metadata", foreignKey.Name, table.Schema, table.Name)
+				}
+			}
+		}
+		for _, view := range schema.SortedViews() {
+			if _, err := renderCreateView(view); err != nil {
+				return fmt.Errorf("view %s.%s: %w", view.Schema, view.Name, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func Open(ctx context.Context, connectionString string) (*Target, error) {
@@ -66,7 +143,12 @@ func (target *Target) Ping(ctx context.Context) error {
 }
 
 func (target *Target) PrepareDatabase(ctx context.Context, database *catalog.Database) error {
+	if err := target.ensureRelationsAbsent(ctx, database); err != nil {
+		return err
+	}
+
 	needsPGCrypto := false
+	needsPG15 := false
 	for _, schema := range database.Schemas {
 		for _, table := range schema.Tables {
 			for _, defaultConstraint := range table.DefaultConstraints {
@@ -75,15 +157,28 @@ func (target *Target) PrepareDatabase(ctx context.Context, database *catalog.Dat
 					break
 				}
 			}
+			for _, uniqueConstraint := range table.UniqueConstraints {
+				if needsNullsNotDistinct(table, uniqueConstraint.Columns) {
+					needsPG15 = true
+				}
+			}
+			for _, index := range table.Indexes {
+				if index.Unique && needsNullsNotDistinct(table, index.Columns) {
+					needsPG15 = true
+				}
+			}
 		}
 	}
 
-	if needsPGCrypto {
+	if needsPGCrypto || needsPG15 {
 		var versionNum int
 		if err := target.pool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&versionNum); err != nil {
 			return fmt.Errorf("check postgresql version: %w", err)
 		}
-		if versionNum < 130000 {
+		if needsPG15 && versionNum < 150000 {
+			return fmt.Errorf("PostgreSQL 15 or newer is required to preserve SQL Server nullable-unique semantics")
+		}
+		if needsPGCrypto && versionNum < 130000 {
 			if _, err := target.pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
 				return fmt.Errorf("create pgcrypto extension: %w", err)
 			}
@@ -101,6 +196,54 @@ func (target *Target) PrepareDatabase(ctx context.Context, database *catalog.Dat
 		}
 	}
 
+	return nil
+}
+
+type targetRelation struct {
+	name string
+	kind string
+}
+
+func targetRelationNames(database *catalog.Database) map[string][]targetRelation {
+	relations := make(map[string][]targetRelation)
+	for _, schema := range database.Schemas {
+		for _, table := range schema.Tables {
+			relations[schema.Name] = append(relations[schema.Name], targetRelation{name: table.Name, kind: "table " + table.Name})
+			if table.PrimaryKeyName != "" {
+				relations[schema.Name] = append(relations[schema.Name], targetRelation{name: table.PrimaryKeyName, kind: "primary key " + table.PrimaryKeyName})
+			}
+			for _, uniqueConstraint := range table.UniqueConstraints {
+				relations[schema.Name] = append(relations[schema.Name], targetRelation{name: uniqueConstraint.Name, kind: "unique constraint " + uniqueConstraint.Name})
+			}
+			for _, index := range table.Indexes {
+				relations[schema.Name] = append(relations[schema.Name], targetRelation{name: index.Name, kind: "index " + index.Name})
+			}
+		}
+		for _, view := range schema.Views {
+			relations[schema.Name] = append(relations[schema.Name], targetRelation{name: view.Name, kind: "view " + view.Name})
+		}
+	}
+	return relations
+}
+
+func (target *Target) ensureRelationsAbsent(ctx context.Context, database *catalog.Database) error {
+	for schemaName, relations := range targetRelationNames(database) {
+		for _, relation := range relations {
+			var exists bool
+			if err := target.pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM pg_catalog.pg_class relation
+					JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+					WHERE namespace.nspname = $1 AND relation.relname = $2
+				)`, schemaName, relation.name).Scan(&exists); err != nil {
+				return fmt.Errorf("check target relation %s.%s: %w", schemaName, relation.name, err)
+			}
+			if exists {
+				return fmt.Errorf("target relation %s.%s already exists; use an empty target for the selected objects", schemaName, relation.name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -202,14 +345,16 @@ func (target *Target) CopyTable(ctx context.Context, table *catalog.Table, strea
 		columnNames = append(columnNames, column.Name)
 	}
 
-	copySource := newStreamCopySource(ctx, stream)
+	copyCtx, cancelCopy := context.WithCancel(ctx)
+	copySource := newStreamCopySource(copyCtx, stream)
 
 	_, err = conn.Conn().CopyFrom(
-		ctx,
+		copyCtx,
 		pgx.Identifier{table.Schema, table.Name},
 		columnNames,
 		copySource,
 	)
+	cancelCopy()
 	if err != nil {
 		return fmt.Errorf("copy %s.%s: %w", table.Schema, table.Name, err)
 	}
@@ -310,29 +455,42 @@ func (target *Target) ResetSequences(ctx context.Context, database *catalog.Data
 				if !column.Identity {
 					continue
 				}
-				var maxVal int64
+				aggregate := "MAX"
+				if column.IdentityIncrement < 0 {
+					aggregate = "MIN"
+				}
+				var rowCount int64
+				var extremeValue *int64
 				query := fmt.Sprintf(
-					`SELECT COALESCE(MAX(%s), 0) FROM %s.%s`,
+					`SELECT COUNT(*), %s(%s) FROM %s.%s`,
+					aggregate,
 					quoteIdentifier(column.Name),
 					quoteIdentifier(table.Schema),
 					quoteIdentifier(table.Name),
 				)
-				if err := target.pool.QueryRow(ctx, query).Scan(&maxVal); err != nil {
-					return fmt.Errorf("get max identity %s.%s.%s: %w", table.Schema, table.Name, column.Name, err)
+				if err := target.pool.QueryRow(ctx, query).Scan(&rowCount, &extremeValue); err != nil {
+					return fmt.Errorf("get identity state %s.%s.%s: %w", table.Schema, table.Name, column.Name, err)
 				}
-				increment := column.IdentityIncrement
-				if increment <= 0 {
-					increment = 1
+
+				lastValue := column.IdentitySeed
+				isCalled := false
+				if rowCount > 0 {
+					if extremeValue == nil {
+						return fmt.Errorf("get identity state %s.%s.%s: non-empty table has no identity value", table.Schema, table.Name, column.Name)
+					}
+					lastValue = *extremeValue
+					isCalled = true
 				}
-				nextVal := max(maxVal+increment, column.IdentitySeed)
-				stmt := fmt.Sprintf(
-					`ALTER TABLE %s.%s ALTER COLUMN %s RESTART WITH %d`,
-					quoteIdentifier(table.Schema),
-					quoteIdentifier(table.Name),
-					quoteIdentifier(column.Name),
-					nextVal,
-				)
-				if _, err := target.pool.Exec(ctx, stmt); err != nil {
+
+				tableIdentifier := pgx.Identifier{table.Schema, table.Name}.Sanitize()
+				if _, err := target.pool.Exec(
+					ctx,
+					`SELECT setval(pg_get_serial_sequence($1, $2)::regclass, $3, $4)`,
+					tableIdentifier,
+					column.Name,
+					lastValue,
+					isCalled,
+				); err != nil {
 					return fmt.Errorf("reset sequence %s.%s.%s: %w", table.Schema, table.Name, column.Name, err)
 				}
 			}
@@ -351,11 +509,15 @@ func renderCreateTable(table *catalog.Table) string {
 		for _, key := range table.PrimaryKey {
 			keys = append(keys, quoteIdentifier(key))
 		}
-		parts = append(parts, "PRIMARY KEY ("+strings.Join(keys, ", ")+")")
+		primaryKey := "PRIMARY KEY (" + strings.Join(keys, ", ") + ")"
+		if table.PrimaryKeyName != "" {
+			primaryKey = "CONSTRAINT " + quoteIdentifier(table.PrimaryKeyName) + " " + primaryKey
+		}
+		parts = append(parts, primaryKey)
 	}
 
 	return fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s.%s (\n  %s\n)",
+		"CREATE TABLE %s.%s (\n  %s\n)",
 		quoteIdentifier(table.Schema),
 		quoteIdentifier(table.Name),
 		strings.Join(parts, ",\n  "),
@@ -365,7 +527,7 @@ func renderCreateTable(table *catalog.Table) string {
 func renderColumn(column *catalog.Column) string {
 	parts := []string{quoteIdentifier(column.Name)}
 	if column.Identity {
-		parts = append(parts, "bigint GENERATED BY DEFAULT AS IDENTITY")
+		parts = append(parts, column.TargetType, "GENERATED BY DEFAULT AS IDENTITY", identitySequenceOptions(column))
 	} else {
 		parts = append(parts, column.TargetType)
 		if !column.Nullable {
@@ -375,8 +537,40 @@ func renderColumn(column *catalog.Column) string {
 	return strings.Join(parts, " ")
 }
 
+func identitySequenceOptions(column *catalog.Column) string {
+	increment := column.IdentityIncrement
+	if increment == 0 {
+		increment = 1
+	}
+
+	minimum, maximum := identityBounds(column)
+	return fmt.Sprintf(
+		"(INCREMENT BY %d MINVALUE %d MAXVALUE %d START WITH %d)",
+		increment,
+		minimum,
+		maximum,
+		column.IdentitySeed,
+	)
+}
+
+func identityBounds(column *catalog.Column) (int64, int64) {
+	switch strings.ToLower(column.SourceType) {
+	case "tinyint":
+		return 0, 255
+	case "smallint":
+		return -32768, 32767
+	case "int":
+		return -2147483648, 2147483647
+	default:
+		return -9223372036854775808, 9223372036854775807
+	}
+}
+
 func renderCreateView(view *catalog.View) (string, error) {
-	definition := normalizeViewDefinition(view.Definition)
+	definition, err := normalizeViewDefinition(view)
+	if err != nil {
+		return "", err
+	}
 	if err := validateViewDefinition(definition); err != nil {
 		return "", err
 	}
@@ -388,6 +582,7 @@ func renderCreateIndex(table *catalog.Table, index *catalog.Index) string {
 	if !ok {
 		return ""
 	}
+	predicate = normalizeBooleanComparisons(table, predicate)
 
 	columns := make([]string, 0, len(index.Columns))
 	for i, column := range index.Columns {
@@ -404,7 +599,7 @@ func renderCreateIndex(table *catalog.Table, index *catalog.Index) string {
 	}
 
 	statement := fmt.Sprintf(
-		"CREATE %sINDEX IF NOT EXISTS %s ON %s.%s (%s)",
+		"CREATE %sINDEX %s ON %s.%s (%s)",
 		unique,
 		quoteIdentifier(index.Name),
 		quoteIdentifier(table.Schema),
@@ -418,6 +613,10 @@ func renderCreateIndex(table *catalog.Table, index *catalog.Index) string {
 			included = append(included, quoteIdentifier(column))
 		}
 		statement += " INCLUDE (" + strings.Join(included, ", ") + ")"
+	}
+
+	if index.Unique && needsNullsNotDistinct(table, index.Columns) {
+		statement += " NULLS NOT DISTINCT"
 	}
 
 	if predicate != "" {
@@ -455,6 +654,9 @@ func renderCreateForeignKey(table *catalog.Table, foreignKey *catalog.ForeignKey
 	if action := normalizeReferentialAction(foreignKey.DeleteRule); action != "" {
 		statement += " ON DELETE " + action
 	}
+	if foreignKey.NotTrusted {
+		statement += " NOT VALID"
+	}
 
 	return statement
 }
@@ -469,32 +671,62 @@ func renderCreateUniqueConstraint(table *catalog.Table, uniqueConstraint *catalo
 		columns = append(columns, quoteIdentifier(column))
 	}
 
+	uniqueClause := "UNIQUE"
+	if needsNullsNotDistinct(table, uniqueConstraint.Columns) {
+		uniqueClause += " NULLS NOT DISTINCT"
+	}
+
 	return fmt.Sprintf(
-		"ALTER TABLE %s.%s ADD CONSTRAINT %s UNIQUE (%s)",
+		"ALTER TABLE %s.%s ADD CONSTRAINT %s %s (%s)",
 		quoteIdentifier(table.Schema),
 		quoteIdentifier(table.Name),
 		quoteIdentifier(uniqueConstraint.Name),
+		uniqueClause,
 		strings.Join(columns, ", "),
 	), nil
 }
 
+func needsNullsNotDistinct(table *catalog.Table, columnNames []string) bool {
+	for _, columnName := range columnNames {
+		found := false
+		for _, column := range table.Columns {
+			if column.Name != columnName {
+				continue
+			}
+			found = true
+			if column.Nullable {
+				return true
+			}
+			break
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
+}
+
 func renderCreateCheckConstraint(table *catalog.Table, checkConstraint *catalog.CheckConstraint) (string, error) {
-	definition := normalizeSQLExpression(checkConstraint.Definition)
+	definition := normalizeBooleanComparisons(table, normalizeSQLExpression(checkConstraint.Definition))
 	if err := validateCheckConstraintDefinition(definition); err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf(
+	statement := fmt.Sprintf(
 		"ALTER TABLE %s.%s ADD CONSTRAINT %s CHECK (%s)",
 		quoteIdentifier(table.Schema),
 		quoteIdentifier(table.Name),
 		quoteIdentifier(checkConstraint.Name),
 		definition,
-	), nil
+	)
+	if checkConstraint.NotTrusted {
+		statement += " NOT VALID"
+	}
+	return statement, nil
 }
 
 func renderCreateDefaultConstraint(table *catalog.Table, defaultConstraint *catalog.DefaultConstraint) (string, error) {
-	definition := normalizeSQLExpression(defaultConstraint.Definition)
+	definition := normalizeDefaultDefinition(table, defaultConstraint)
 	if err := validateDefaultConstraintDefinition(definition); err != nil {
 		return "", err
 	}
@@ -508,15 +740,103 @@ func renderCreateDefaultConstraint(table *catalog.Table, defaultConstraint *cata
 	), nil
 }
 
+func normalizeDefaultDefinition(table *catalog.Table, defaultConstraint *catalog.DefaultConstraint) string {
+	definition := normalizeSQLExpression(defaultConstraint.Definition)
+	column := findColumn(table, defaultConstraint.Column)
+	if column == nil {
+		return definition
+	}
+
+	value := trimExpressionParens(definition)
+	switch column.TargetType {
+	case "boolean":
+		switch value {
+		case "0":
+			return "FALSE"
+		case "1":
+			return "TRUE"
+		}
+	case "bytea":
+		if len(value) >= 2 && strings.EqualFold(value[:2], "0x") {
+			hexValue := value[2:]
+			if hexValue != "" && hexLiteralPattern.MatchString(hexValue) && len(hexValue)%2 == 0 {
+				return `'\x` + hexValue + `'::bytea`
+			}
+		}
+	}
+	return definition
+}
+
+func normalizeBooleanComparisons(table *catalog.Table, definition string) string {
+	protected := sqlrewrite.Protect(definition, false)
+	normalized := protected.SQL
+	for _, column := range table.Columns {
+		if column.TargetType != "boolean" {
+			continue
+		}
+
+		identifier := regexp.QuoteMeta(quoteIdentifier(column.Name))
+		rightValue := regexp.MustCompile(`(?i)(` + identifier + `\s*(?:=|<>|!=)\s*)(?:\(\s*([01])\s*\)|([01]))`)
+		normalized = rightValue.ReplaceAllStringFunc(normalized, func(match string) string {
+			parts := rightValue.FindStringSubmatch(match)
+			value := parts[2]
+			if value == "" {
+				value = parts[3]
+			}
+			return parts[1] + booleanLiteral(value)
+		})
+		leftValue := regexp.MustCompile(`(?i)(?:\(\s*([01])\s*\)|([01]))(\s*(?:=|<>|!=)\s*` + identifier + `)`)
+		normalized = leftValue.ReplaceAllStringFunc(normalized, func(match string) string {
+			parts := leftValue.FindStringSubmatch(match)
+			value := parts[1]
+			if value == "" {
+				value = parts[2]
+			}
+			return booleanLiteral(value) + parts[3]
+		})
+	}
+	return protected.Restore(normalized)
+}
+
+func booleanLiteral(value string) string {
+	if value == "1" {
+		return "TRUE"
+	}
+	return "FALSE"
+}
+
+func findColumn(table *catalog.Table, name string) *catalog.Column {
+	for _, column := range table.Columns {
+		if column.Name == name {
+			return column
+		}
+	}
+	return nil
+}
+
+func trimExpressionParens(value string) string {
+	value = strings.TrimSpace(value)
+	for len(value) >= 2 && value[0] == '(' && value[len(value)-1] == ')' {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return value
+}
+
 func normalizeReferentialAction(rule string) string {
 	switch strings.ToUpper(strings.TrimSpace(rule)) {
 	case "CASCADE":
 		return "CASCADE"
 	case "SET NULL":
 		return "SET NULL"
+	case "SET_NULL":
+		return "SET NULL"
 	case "SET DEFAULT":
 		return "SET DEFAULT"
+	case "SET_DEFAULT":
+		return "SET DEFAULT"
 	case "NO ACTION":
+		return "NO ACTION"
+	case "NO_ACTION":
 		return "NO ACTION"
 	case "RESTRICT":
 		return "RESTRICT"
@@ -536,6 +856,25 @@ func validateViewDefinition(definition string) error {
 		"OUTER APPLY",
 		"TRY_CONVERT(",
 		"TRY_CAST(",
+		"CHARINDEX(",
+		"CONVERT(",
+		"DATALENGTH(",
+		"DATEADD(",
+		"DATEDIFF(",
+		"GETDATE(",
+		"GETUTCDATE(",
+		"IIF(",
+		"ISNULL(",
+		"LEN(",
+		"LOG(",
+		"NEWID(",
+		"NEWSEQUENTIALID(",
+		"REPLICATE(",
+		"SPACE(",
+		"STUFF(",
+		"SYSDATETIME(",
+		"SYSDATETIMEOFFSET(",
+		"SYSUTCDATETIME(",
 	}
 
 	for _, token := range unsupported {
@@ -591,8 +930,8 @@ func validateDefaultConstraintDefinition(definition string) error {
 	return nil
 }
 
-func normalizeViewDefinition(definition string) string {
-	lines := strings.Split(strings.ReplaceAll(definition, "\r\n", "\n"), "\n")
+func normalizeViewDefinition(view *catalog.View) (string, error) {
+	lines := strings.Split(strings.ReplaceAll(view.Definition, "\r\n", "\n"), "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -603,23 +942,31 @@ func normalizeViewDefinition(definition string) string {
 	}
 
 	normalized := strings.TrimSpace(strings.Join(kept, "\n"))
-	normalized = createViewPattern.ReplaceAllString(normalized, "CREATE OR REPLACE VIEW ")
-	normalized = schemaBindingPattern.ReplaceAllString(normalized, "")
-	normalized = bracketIdentifierPattern.ReplaceAllString(normalized, `"$1"`)
+	header := viewHeaderPattern.FindStringSubmatchIndex(normalized)
+	if header == nil {
+		return "", fmt.Errorf("%w: missing CREATE VIEW header", errUnsupportedViewDefinition)
+	}
+
+	columnList := ""
+	if header[2] >= 0 {
+		columnList = normalized[header[2]:header[3]]
+	}
+	normalized = "CREATE VIEW " + quoteIdentifier(view.Schema) + "." + quoteIdentifier(view.Name) + columnList + " AS" + normalized[header[1]:]
 	normalized = normalizeSQLExpression(normalized)
-	return normalized
+	return normalized, nil
 }
 
 func normalizeSQLExpression(expression string) string {
-	normalized := expression
-	normalized = bracketIdentifierPattern.ReplaceAllString(normalized, `"$1"`)
+	protected := sqlrewrite.Protect(expression, true)
+	normalized := protected.SQL
+	normalized = normalizeBracketIdentifiers(normalized)
 	normalized = collatePattern.ReplaceAllString(normalized, "")
-	normalized = unicodeStringPattern.ReplaceAllString(normalized, `'`)
 	normalized = isNullPattern.ReplaceAllString(normalized, "COALESCE(")
 	normalized = getDatePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = getUTCDatePattern.ReplaceAllString(normalized, "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	normalized = getOffsetDatePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = newIDPattern.ReplaceAllString(normalized, "gen_random_uuid()")
-	normalized = lenPattern.ReplaceAllString(normalized, "LENGTH(")
+	normalized = lenPattern.ReplaceAllString(normalized, "LENGTH(RTRIM($1))")
 	normalized = dataLengthPattern.ReplaceAllString(normalized, "OCTET_LENGTH(")
 	normalized = charIndexPattern.ReplaceAllString(normalized, "POSITION($1 IN $2)")
 	normalized = iifPattern.ReplaceAllStringFunc(normalized, translateIIF)
@@ -638,7 +985,48 @@ func normalizeSQLExpression(expression string) string {
 		}
 		normalized = next
 	}
-	return normalized
+	return protected.Restore(normalized)
+}
+
+func normalizeBracketIdentifiers(input string) string {
+	var output strings.Builder
+	output.Grow(len(input))
+
+	for index := 0; index < len(input); {
+		if input[index] != '[' {
+			output.WriteByte(input[index])
+			index++
+			continue
+		}
+
+		start := index
+		index++
+		var identifier strings.Builder
+		closed := false
+		for index < len(input) {
+			if input[index] != ']' {
+				identifier.WriteByte(input[index])
+				index++
+				continue
+			}
+			if index+1 < len(input) && input[index+1] == ']' {
+				identifier.WriteByte(']')
+				index += 2
+				continue
+			}
+			index++
+			closed = true
+			break
+		}
+
+		if !closed {
+			output.WriteString(input[start:])
+			break
+		}
+		output.WriteString(quoteIdentifier(identifier.String()))
+	}
+
+	return output.String()
 }
 
 func translateIIF(s string) string {
@@ -687,15 +1075,15 @@ func translateDATEDIFF(s string) string {
 	case "day", "dd", "d", "dayofyear", "dy", "y":
 		return fmt.Sprintf("((%s)::date - (%s)::date)", end, start)
 	case "week", "wk", "ww":
-		return fmt.Sprintf("(((%s)::date - (%s)::date) / 7)", end, start)
+		return fmt.Sprintf("((DATE_TRUNC('week', (%s)::date + 1)::date - DATE_TRUNC('week', (%s)::date + 1)::date) / 7)", end, start)
 	case "hour", "hh":
-		return fmt.Sprintf("(EXTRACT(EPOCH FROM (%s)::timestamp - (%s)::timestamp) / 3600)::bigint", end, start)
+		return fmt.Sprintf("(EXTRACT(EPOCH FROM (DATE_TRUNC('hour', (%s)::timestamp) - DATE_TRUNC('hour', (%s)::timestamp))) / 3600)::integer", end, start)
 	case "minute", "mi", "n":
-		return fmt.Sprintf("(EXTRACT(EPOCH FROM (%s)::timestamp - (%s)::timestamp) / 60)::bigint", end, start)
+		return fmt.Sprintf("(EXTRACT(EPOCH FROM (DATE_TRUNC('minute', (%s)::timestamp) - DATE_TRUNC('minute', (%s)::timestamp))) / 60)::integer", end, start)
 	case "second", "ss", "s":
-		return fmt.Sprintf("(EXTRACT(EPOCH FROM (%s)::timestamp - (%s)::timestamp))::bigint", end, start)
+		return fmt.Sprintf("EXTRACT(EPOCH FROM (DATE_TRUNC('second', (%s)::timestamp) - DATE_TRUNC('second', (%s)::timestamp)))::integer", end, start)
 	case "millisecond", "ms":
-		return fmt.Sprintf("(EXTRACT(EPOCH FROM (%s)::timestamp - (%s)::timestamp) * 1000)::bigint", end, start)
+		return fmt.Sprintf("(EXTRACT(EPOCH FROM (DATE_TRUNC('milliseconds', (%s)::timestamp) - DATE_TRUNC('milliseconds', (%s)::timestamp))) * 1000)::integer", end, start)
 	default:
 		return s
 	}
@@ -991,31 +1379,7 @@ func isPortableDefaultConstraintDefinition(definition string) bool {
 }
 
 func sqlForValidation(sql string) string {
-	var builder strings.Builder
-	builder.Grow(len(sql))
-
-	inString := false
-	for i := 0; i < len(sql); i++ {
-		ch := sql[i]
-		if ch != '\'' {
-			if inString {
-				builder.WriteByte(' ')
-			} else {
-				builder.WriteByte(ch)
-			}
-			continue
-		}
-
-		builder.WriteByte(' ')
-		if inString && i+1 < len(sql) && sql[i+1] == '\'' {
-			builder.WriteByte(' ')
-			i++
-			continue
-		}
-		inString = !inString
-	}
-
-	return builder.String()
+	return sqlrewrite.Protect(sql, false).SQL
 }
 
 func quoteIdentifier(identifier string) string {

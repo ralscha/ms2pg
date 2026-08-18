@@ -1,6 +1,16 @@
 package app
 
-import "testing"
+import (
+	"errors"
+	"flag"
+	"testing"
+)
+
+func TestParseConfigHelp(t *testing.T) {
+	if _, err := parseConfig([]string{"-help"}); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("parseConfig(-help) error = %v, want flag.ErrHelp", err)
+	}
+}
 
 func TestParseConfigParsesFilterFlags(t *testing.T) {
 	cfg, err := parseConfig([]string{

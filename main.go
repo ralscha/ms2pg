@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -19,6 +21,9 @@ func run() int {
 	defer stop()
 
 	if err := app.Run(ctx, os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("migration failed", "error", err)
 		return 1
 	}

@@ -1,24 +1,44 @@
 # ms2pg - MSSQL to PostgreSQL migration tool
 
-ms2pg is a focused MSSQL to PostgreSQL migration tool written in Go. It introspects a SQL Server database, maps supported objects to PostgreSQL, creates the target structure, copies table data with PostgreSQL COPY, and recreates supported views and indexes.
+ms2pg is a focused Microsoft SQL Server to PostgreSQL migration tool written in Go. It introspects a SQL Server database, maps supported objects to PostgreSQL, creates the target structure, copies table data with PostgreSQL COPY, and recreates supported views and indexes.
 
-The current implementation is built for schema-and-data migration of relational objects that are common in application databases. It is intentionally strict: when it encounters unsupported source definitions, it fails with a clear error instead of silently producing a partial or incorrect translation.
+The current implementation targets common relational application schemas. It validates known SQL translation limits before changing the target and fails clearly when a definition cannot be translated safely. SQL Server and PostgreSQL are not feature-equivalent, so the supported boundary and lossy mappings are documented below.
 
 ## What it migrates
 
 - schemas
 - tables and columns
-- primary keys
-- named unique constraints
+- named primary keys
+- named unique constraints, including SQL Server's nullable-unique behavior
 - secondary indexes
 - PostgreSQL-safe filtered indexes
 - included-column indexes
 - named default constraints, recreated as PostgreSQL column defaults
-- supported check constraints
-- foreign keys discovered through INFORMATION_SCHEMA
+- supported check constraints, preserving untrusted state with PostgreSQL `NOT VALID`
+- foreign keys discovered through SQL Server system catalogs, including keys backed by unique indexes and untrusted state
 - views that match the supported normalization rules
 - table data using streaming PostgreSQL COPY
-- identity-backed sequences reset after data load
+- identity columns with their integer width, seed, increment, and post-load sequence state preserved
+
+The selected target tables and views must not already exist. This prevents a repeated run from appending duplicate data or overwriting an existing relation.
+
+## Data type behavior
+
+| SQL Server | PostgreSQL | Notes |
+| --- | --- | --- |
+| `bigint`, `int`, `smallint`, `tinyint` | `bigint`, `integer`, `smallint`, `smallint` | Identity width, bounds, seed, and positive or negative increment are preserved. |
+| `decimal`, `numeric` | `numeric(p,s)` | Precision and scale are preserved. Decimal/numeric identity columns are rejected because PostgreSQL identity sequences cannot preserve their full range. |
+| `float`, `real` | `double precision`/`real` | SQL Server `float(1..24)` maps to `real`. |
+| `money`, `smallmoney` | `numeric(19,4)`/`numeric(10,4)` | Exact decimal values are copied. |
+| `char`, `varchar`, `nchar`, `nvarchar` | `character(n)`/`character varying(n)` | Declared limits are preserved; `max`, `text`, and `ntext` map to `text`. |
+| binary types, `image`, `rowversion` | `bytea` | `rowversion` values are snapshots; PostgreSQL does not recreate SQL Server's database-wide rowversion generator. |
+| `uniqueidentifier` | `uuid` | `NEWID()`/`NEWSEQUENTIALID()` defaults use `gen_random_uuid()`; sequential UUID generation is not preserved. |
+| date/time types | corresponding PostgreSQL date/time type | Fractional precision is preserved up to PostgreSQL's six-digit limit. `datetimeoffset` maps to `timestamptz`. |
+| `xml` | `xml` | XML data is copied to PostgreSQL's XML type. |
+| `hierarchyid`, `geography`, `geometry` | `bytea` | SQL Server's serialized representation is preserved as opaque bytes, not converted to PostGIS or another native type. |
+| `sql_variant` | `text` | Values are stringified, so their per-value source type metadata is not preserved. |
+
+Computed columns are currently materialized as ordinary PostgreSQL columns: their values are copied, but their generation expressions are not recreated.
 
 ## How it works
 
@@ -61,7 +81,26 @@ View, default-expression, and check-constraint translation is selective and base
 - `CAST()` from common MSSQL-specific types
 - single-argument `LOG()`
 
-If a source definition falls outside the supported translation rules, ms2pg returns an explicit error describing the unsupported token or expression.
+Rewrites avoid string literals and SQL comments. If a source definition falls outside the supported translation rules, ms2pg returns an explicit error describing the unsupported token or expression.
+
+`DATALENGTH()` maps to PostgreSQL `OCTET_LENGTH()`, which measures the target encoding. Its result can differ for Unicode strings because SQL Server and PostgreSQL use different encodings.
+
+## Not migrated
+
+The following SQL Server-specific features are not currently recreated:
+
+- stored procedures, user-defined functions, and triggers
+- standalone sequences and synonyms
+- users, roles, grants, and ownership
+- partitioning, filegroups, compression, and memory-optimized table properties
+- temporal-table behavior, change tracking, CDC, replication, and Service Broker
+- full-text, XML, spatial, columnstore, hash, and JSON indexes
+- exact SQL Server collation behavior
+- computed-column expressions and rowversion generation
+
+Views, defaults, checks, and filtered-index predicates are translated only when they match the documented normalization rules. The tool does not attempt to act as a general T-SQL compiler.
+
+Disabled indexes and disabled check/foreign-key constraints are rejected because PostgreSQL cannot preserve their enforcement state directly. Enabled but untrusted check constraints and foreign keys are created as `NOT VALID`.
 
 ## Filtering
 
@@ -78,9 +117,9 @@ Foreign keys that point to tables outside the selected migration set are skipped
 
 ## Requirements
 
-- Go 1.26.4+
+- Go 1.26.6+
 - access to a SQL Server source database
-- access to a PostgreSQL target database
+- access to PostgreSQL 15+ (required to preserve SQL Server nullable-unique semantics)
 - Docker, if you want to run the container-backed integration tests
 
 ## Testing

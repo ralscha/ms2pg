@@ -54,7 +54,10 @@ func Run(ctx context.Context, args []string) error {
 
 func parseConfig(args []string) (Config, error) {
 	fs := flag.NewFlagSet("ms2pg", flag.ContinueOnError)
-	fs.Usage = func() {}
+	fs.Usage = func() {
+		_, _ = fmt.Fprintln(fs.Output(), "Usage: ms2pg -source <sqlserver-dsn> -target <postgres-dsn> [options]")
+		fs.PrintDefaults()
+	}
 
 	var cfg Config
 	fs.StringVar(&cfg.SourceDSN, "source", "", "MSSQL connection string")

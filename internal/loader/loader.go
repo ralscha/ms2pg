@@ -28,6 +28,15 @@ type Runner struct {
 
 func (runner Runner) Run(ctx context.Context) error {
 	logger := runner.logger()
+	filters := catalog.Filters{
+		IncludeSchemas: runner.Config.IncludeSchemas,
+		IncludeTables:  runner.Config.IncludeTables,
+		ExcludeSchemas: runner.Config.ExcludeSchemas,
+		ExcludeTables:  runner.Config.ExcludeTables,
+	}
+	if err := filters.Validate(); err != nil {
+		return fmt.Errorf("validate filters: %w", err)
+	}
 
 	source, err := mssql.Open(runner.Config.SourceDSN)
 	if err != nil {
@@ -51,18 +60,17 @@ func (runner Runner) Run(ctx context.Context) error {
 	}
 
 	logger.Info("introspecting source catalog")
-	database, err := source.Introspect(ctx, catalog.Filters{
-		IncludeSchemas: runner.Config.IncludeSchemas,
-		IncludeTables:  runner.Config.IncludeTables,
-		ExcludeSchemas: runner.Config.ExcludeSchemas,
-		ExcludeTables:  runner.Config.ExcludeTables,
-	})
+	database, err := source.Introspect(ctx, filters)
 	if err != nil {
 		return fmt.Errorf("introspect source: %w", err)
 	}
 
 	if err := mapCatalog(database); err != nil {
 		return fmt.Errorf("map source catalog: %w", err)
+	}
+	filterForeignKeys(database)
+	if err := targetdb.Validate(database); err != nil {
+		return fmt.Errorf("validate source catalog: %w", err)
 	}
 
 	logger.Info("preparing target database")
@@ -109,7 +117,6 @@ func (runner Runner) Run(ctx context.Context) error {
 	}
 
 	logger.Info("creating foreign keys")
-	filterForeignKeys(database)
 	if err := target.CreateForeignKeys(ctx, database); err != nil {
 		return fmt.Errorf("create foreign keys: %w", err)
 	}

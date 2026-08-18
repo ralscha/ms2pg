@@ -32,3 +32,10 @@ func TestMatchPatternRejectsInvalidGlob(t *testing.T) {
 		t.Fatal("matchPattern returned true for invalid glob")
 	}
 }
+
+func TestFiltersValidateRejectsInvalidGlob(t *testing.T) {
+	filters := Filters{IncludeTables: []string{"dbo.[users"}}
+	if err := filters.Validate(); err == nil {
+		t.Fatal("Validate() returned nil, want invalid glob error")
+	}
+}
