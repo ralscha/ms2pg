@@ -417,18 +417,16 @@ func startMSSQLContainer(ctx context.Context, t *testing.T) testcontainers.Conta
 	t.Helper()
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "mcr.microsoft.com/mssql/server:2022-latest",
-			ExposedPorts: []string{"1433/tcp"},
-			Env: map[string]string{
-				"ACCEPT_EULA":       "Y",
-				"MSSQL_SA_PASSWORD": mssqlPassword,
-			},
-			WaitingFor: wait.ForAll(
-				wait.ForListeningPort("1433/tcp"),
-				wait.ForLog("SQL Server is now ready for client connections"),
-			).WithDeadline(3 * time.Minute),
+		Image:        "mcr.microsoft.com/mssql/server:2022-latest",
+		ExposedPorts: []string{"1433/tcp"},
+		Env: map[string]string{
+			"ACCEPT_EULA":       "Y",
+			"MSSQL_SA_PASSWORD": mssqlPassword,
 		},
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("1433/tcp"),
+			wait.ForLog("SQL Server is now ready for client connections"),
+		).WithDeadline(3 * time.Minute),
 		Started: true,
 	})
 	if err != nil {
@@ -446,19 +444,17 @@ func startPostgresContainer(ctx context.Context, t *testing.T) testcontainers.Co
 	t.Helper()
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "postgres:16-alpine",
-			ExposedPorts: []string{"5432/tcp"},
-			Env: map[string]string{
-				"POSTGRES_USER":     postgresUser,
-				"POSTGRES_PASSWORD": postgresPass,
-				"POSTGRES_DB":       postgresDB,
-			},
-			WaitingFor: wait.ForAll(
-				wait.ForListeningPort("5432/tcp"),
-				wait.ForLog("database system is ready to accept connections"),
-			).WithDeadline(2 * time.Minute),
+		Image:        "postgres:16-alpine",
+		ExposedPorts: []string{"5432/tcp"},
+		Env: map[string]string{
+			"POSTGRES_USER":     postgresUser,
+			"POSTGRES_PASSWORD": postgresPass,
+			"POSTGRES_DB":       postgresDB,
 		},
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("5432/tcp"),
+			wait.ForLog("database system is ready to accept connections"),
+		).WithDeadline(2 * time.Minute),
 		Started: true,
 	})
 	if err != nil {
