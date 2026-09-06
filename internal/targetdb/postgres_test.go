@@ -321,6 +321,36 @@ func TestValidateRejectsPostgreSQLRelationNameCollision(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsIdentifiersPostgreSQLWouldTruncate(t *testing.T) {
+	database := &catalog.Database{Schemas: []*catalog.Schema{{
+		Name: "dbo",
+		Tables: []*catalog.Table{{
+			Schema: "dbo",
+			Name:   strings.Repeat("x", maxPostgresIdentifierBytes+1),
+		}},
+	}}}
+
+	err := Validate(database)
+	if err == nil || !strings.Contains(err.Error(), "PostgreSQL supports at most 63 bytes") {
+		t.Fatalf("Validate() error = %v, want PostgreSQL identifier length error", err)
+	}
+}
+
+func TestValidateRejectsInconsistentSchemaMetadata(t *testing.T) {
+	database := &catalog.Database{Schemas: []*catalog.Schema{{
+		Name: "dbo",
+		Tables: []*catalog.Table{{
+			Schema: "sales",
+			Name:   "orders",
+		}},
+	}}}
+
+	err := Validate(database)
+	if err == nil || !strings.Contains(err.Error(), `belongs to schema "sales" but is listed in schema "dbo"`) {
+		t.Fatalf("Validate() error = %v, want inconsistent schema error", err)
+	}
+}
+
 func TestValidateRejectsDisabledAndNonRowstoreObjects(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -671,7 +701,7 @@ func TestRenderCreateViewNormalizesDateAddDay(t *testing.T) {
 		t.Fatalf("renderCreateView returned error: %v", err)
 	}
 
-	if !strings.Contains(statement, `("u"."created_at" + (1 * INTERVAL '1 day')) AS "created_plus_day"`) {
+	if !strings.Contains(statement, `("u"."created_at" + (TRUNC((1)::numeric)::double precision * INTERVAL '1 day')) AS "created_plus_day"`) {
 		t.Fatalf("statement %q does not contain translated DATEADD expression", statement)
 	}
 }
@@ -706,6 +736,32 @@ func TestNormalizeSQLExpressionDoesNotRewriteStringsOrComments(t *testing.T) {
 	want := "'[name] GETDATE()' + \"name\" -- LEN([ignored])\n/* TOP [also_ignored] */"
 	if got := normalizeSQLExpression(input); got != want {
 		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestNormalizeSQLExpressionDoesNotRewriteDelimitedIdentifiers(t *testing.T) {
+	input := `[GETDATE()] + "LEN()" + GETDATE()`
+	want := `"GETDATE()" + "LEN()" + CURRENT_TIMESTAMP`
+	if got := normalizeSQLExpression(input); got != want {
+		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestRenderCreateViewAllowsUnsupportedTokensInDelimitedIdentifiers(t *testing.T) {
+	view := &catalog.View{
+		Schema:     "reporting",
+		Name:       "odd_identifiers",
+		Definition: `CREATE VIEW reporting.odd_identifiers AS SELECT 1 AS [NEXT VALUE FOR], 2 AS [TRY_CONVERT()]`,
+	}
+
+	statement, err := renderCreateView(view)
+	if err != nil {
+		t.Fatalf("renderCreateView returned error: %v", err)
+	}
+	for _, identifier := range []string{`"NEXT VALUE FOR"`, `"TRY_CONVERT()"`} {
+		if !strings.Contains(statement, identifier) {
+			t.Fatalf("statement %q does not preserve %q", statement, identifier)
+		}
 	}
 }
 
@@ -796,9 +852,61 @@ func TestNormalizeSQLExpressionCharIndexThreeArgLeftUntranslated(t *testing.T) {
 func TestNormalizeSQLExpressionDateAddColumnExpression(t *testing.T) {
 	// DATEADD n parameter as a column reference must translate.
 	input := `DATEADD(day, [offset_days], [created_at])`
-	want := `("created_at" + ("offset_days" * INTERVAL '1 day'))`
+	want := `("created_at" + (TRUNC(("offset_days")::numeric)::double precision * INTERVAL '1 day'))`
 	if got := normalizeSQLExpression(input); got != want {
 		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestNormalizeSQLExpressionDateAddTruncatesFractionalNumber(t *testing.T) {
+	input := `DATEADD(day, 1.9, [created_at])`
+	want := `("created_at" + (TRUNC((1.9)::numeric)::double precision * INTERVAL '1 day'))`
+	if got := normalizeSQLExpression(input); got != want {
+		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestNormalizeSQLExpressionRemovesDelimitedCollation(t *testing.T) {
+	input := `[name] COLLATE [SQL_Latin1_General_CP1_CI_AS] = N'test'`
+	want := `"name"  = 'test'`
+	if got := normalizeSQLExpression(input); got != want {
+		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestValidateRejectsStandaloneSequenceReferences(t *testing.T) {
+	tests := []struct {
+		name     string
+		database *catalog.Database
+		want     error
+	}{
+		{
+			name: "default",
+			database: &catalog.Database{Schemas: []*catalog.Schema{{Name: "dbo", Tables: []*catalog.Table{{
+				Schema:  "dbo",
+				Name:    "events",
+				Columns: []*catalog.Column{{Name: "id", TargetType: "bigint"}},
+				DefaultConstraints: []*catalog.DefaultConstraint{{
+					Name: "df_events_id", Column: "id", Definition: `NEXT VALUE FOR [dbo].[event_sequence]`,
+				}},
+			}}}}},
+			want: errUnsupportedDefaultConstraintDefinition,
+		},
+		{
+			name: "view",
+			database: &catalog.Database{Schemas: []*catalog.Schema{{Name: "dbo", Views: []*catalog.View{{
+				Schema: "dbo", Name: "next_event", Definition: `CREATE VIEW dbo.next_event AS SELECT NEXT VALUE FOR dbo.event_sequence AS id`,
+			}}}}},
+			want: errUnsupportedViewDefinition,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := Validate(test.database); !errors.Is(err, test.want) || !strings.Contains(err.Error(), "NEXT VALUE FOR") {
+				t.Fatalf("Validate() error = %v, want %v mentioning NEXT VALUE FOR", err, test.want)
+			}
+		})
 	}
 }
 

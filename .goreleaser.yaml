@@ -8,6 +8,8 @@ builds:
     binary: ms2pg
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X ms2pg/internal/app.Version={{.Version}}
     goos:
       - linux
       - darwin

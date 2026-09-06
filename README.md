@@ -117,7 +117,7 @@ Foreign keys that point to tables outside the selected migration set are skipped
 
 ## Requirements
 
-- Go 1.26.6+
+- Go 1.27.1+
 - access to a SQL Server source database
 - access to PostgreSQL 15+ (required to preserve SQL Server nullable-unique semantics)
 - Docker, if you want to run the container-backed integration tests
@@ -188,6 +188,7 @@ go run . \
 - `-target`: PostgreSQL connection string
 - `-schema-only`: create schemas, tables, constraints, indexes, and views without copying table rows
 - `-verbose`: enable debug logging
+- `-version`: print the build version and exit
 - `-include-schemas`: comma-separated schema filters with glob support
 - `-include-tables`: comma-separated table and view filters with glob support
 - `-exclude-schemas`: comma-separated schema filters to skip

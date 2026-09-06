@@ -22,6 +22,8 @@ var errUnsupportedCheckConstraintDefinition = errors.New("unsupported MSSQL chec
 var errUnsupportedDefaultConstraintDefinition = errors.New("unsupported MSSQL default constraint definition")
 var errInvalidUniqueConstraint = errors.New("invalid unique constraint metadata")
 
+const maxPostgresIdentifierBytes = 63
+
 var (
 	viewHeaderPattern    = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+VIEW\s+(?:(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)\s*\.\s*)?(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)(\s*\([^)]*\))?(?:\s+WITH\s+SCHEMABINDING)?\s+AS\b`)
 	setDirectivePattern  = regexp.MustCompile(`(?i)^SET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)\s*;?$`)
@@ -37,14 +39,47 @@ var (
 	dateDiffPattern      = regexp.MustCompile(`(?i)\bDATEDIFF\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
 	iifPattern           = regexp.MustCompile(`(?i)\bIIF\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
 	stuffPattern         = regexp.MustCompile(`(?i)\bSTUFF\s*\(\s*([^,]+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^)]+?)\s*\)`)
-	collatePattern       = regexp.MustCompile(`(?i)\bCOLLATE\s+\w+`)
+	collatePattern       = regexp.MustCompile(`(?i)\bCOLLATE\s+(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z0-9_]+)`)
 	replicatePattern     = regexp.MustCompile(`(?i)\bREPLICATE\s*\(`)
 	spacePattern         = regexp.MustCompile(`(?i)\bSPACE\s*\(\s*([^)]+?)\s*\)`)
 	convertSafePattern   = regexp.MustCompile(`(?i)\bCONVERT\s*\(\s*(varchar|nvarchar|nchar|char|text|ntext|uniqueidentifier|sysname|money|smallmoney|integer|int|bigint|smallint|tinyint|float|real|bit|date|datetime2|smalldatetime|datetime|datetimeoffset|numeric|decimal)\s*(?:\(\s*[\d,\s]+\s*\))?\s*,\s*([^,)]+?)\s*\)`)
 	logSingleArgPattern  = regexp.MustCompile(`(?i)\bLOG\s*\(\s*([^,)]+?)\s*\)`)
 	castTypePattern      = regexp.MustCompile(`(?i)\bCAST\s*\(\s*(.+?)\s+AS\s+(datetimeoffset|datetime2|smalldatetime|datetime|smallmoney|money|uniqueidentifier|sysname|nvarchar|nchar|ntext|tinyint|bit)\s*(?:\([^)]*\))?\s*\)`)
+	nextValueForPattern  = regexp.MustCompile(`(?i)\bNEXT\s+VALUE\s+FOR\b`)
 	sqlFunctionPattern   = regexp.MustCompile(`(?i)\b([A-Z_][A-Z0-9_]*)\(`)
 	hexLiteralPattern    = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
+	portableSQLFunctions = map[string]struct{}{
+		"ABS":             {},
+		"CASE":            {},
+		"CAST":            {},
+		"CEILING":         {},
+		"COALESCE":        {},
+		"CONCAT":          {},
+		"EXP":             {},
+		"EXTRACT":         {},
+		"FLOOR":           {},
+		"GEN_RANDOM_UUID": {},
+		"LEFT":            {},
+		"LENGTH":          {},
+		"LN":              {},
+		"LOWER":           {},
+		"LTRIM":           {},
+		"NULLIF":          {},
+		"OCTET_LENGTH":    {},
+		"OVERLAY":         {},
+		"PI":              {},
+		"POSITION":        {},
+		"POWER":           {},
+		"REPEAT":          {},
+		"RIGHT":           {},
+		"ROUND":           {},
+		"RTRIM":           {},
+		"SQRT":            {},
+		"SUBSTRING":       {},
+		"TRIM":            {},
+		"TRUNC":           {},
+		"UPPER":           {},
+	}
 )
 
 type Target struct {
@@ -57,6 +92,9 @@ type Target struct {
 func Validate(database *catalog.Database) error {
 	if database == nil {
 		return errors.New("missing source catalog")
+	}
+	if err := validateCatalogMetadata(database); err != nil {
+		return err
 	}
 
 	for schemaName, relations := range targetRelationNames(database) {
@@ -123,6 +161,109 @@ func Validate(database *catalog.Database) error {
 		}
 	}
 
+	return nil
+}
+
+func validateCatalogMetadata(database *catalog.Database) error {
+	for schemaIndex, schema := range database.Schemas {
+		if schema == nil {
+			return fmt.Errorf("invalid source catalog: schema %d is missing", schemaIndex)
+		}
+		if err := validateIdentifier("schema", schema.Name); err != nil {
+			return err
+		}
+
+		for tableIndex, table := range schema.Tables {
+			if table == nil {
+				return fmt.Errorf("invalid source catalog: table %d in schema %q is missing", tableIndex, schema.Name)
+			}
+			if table.Schema != schema.Name {
+				return fmt.Errorf("invalid source catalog: table %q belongs to schema %q but is listed in schema %q", table.Name, table.Schema, schema.Name)
+			}
+			if err := validateIdentifier("table", table.Name); err != nil {
+				return err
+			}
+			if table.PrimaryKeyName != "" {
+				if err := validateIdentifier("primary key", table.PrimaryKeyName); err != nil {
+					return err
+				}
+			}
+			for columnIndex, column := range table.Columns {
+				if column == nil {
+					return fmt.Errorf("invalid source catalog: column %d on %s.%s is missing", columnIndex, table.Schema, table.Name)
+				}
+				if err := validateIdentifier("column", column.Name); err != nil {
+					return err
+				}
+			}
+			for indexPosition, index := range table.Indexes {
+				if index == nil {
+					return fmt.Errorf("invalid source catalog: index %d on %s.%s is missing", indexPosition, table.Schema, table.Name)
+				}
+				if err := validateIdentifier("index", index.Name); err != nil {
+					return err
+				}
+			}
+			for constraintIndex, constraint := range table.UniqueConstraints {
+				if constraint == nil {
+					return fmt.Errorf("invalid source catalog: unique constraint %d on %s.%s is missing", constraintIndex, table.Schema, table.Name)
+				}
+				if err := validateIdentifier("unique constraint", constraint.Name); err != nil {
+					return err
+				}
+			}
+			for constraintIndex, constraint := range table.CheckConstraints {
+				if constraint == nil {
+					return fmt.Errorf("invalid source catalog: check constraint %d on %s.%s is missing", constraintIndex, table.Schema, table.Name)
+				}
+				if err := validateIdentifier("check constraint", constraint.Name); err != nil {
+					return err
+				}
+			}
+			for constraintIndex, constraint := range table.DefaultConstraints {
+				if constraint == nil {
+					return fmt.Errorf("invalid source catalog: default constraint %d on %s.%s is missing", constraintIndex, table.Schema, table.Name)
+				}
+			}
+			for constraintIndex, constraint := range table.ForeignKeys {
+				if constraint == nil {
+					return fmt.Errorf("invalid source catalog: foreign key %d on %s.%s is missing", constraintIndex, table.Schema, table.Name)
+				}
+				if err := validateIdentifier("foreign key", constraint.Name); err != nil {
+					return err
+				}
+			}
+		}
+
+		for viewIndex, view := range schema.Views {
+			if view == nil {
+				return fmt.Errorf("invalid source catalog: view %d in schema %q is missing", viewIndex, schema.Name)
+			}
+			if view.Schema != schema.Name {
+				return fmt.Errorf("invalid source catalog: view %q belongs to schema %q but is listed in schema %q", view.Name, view.Schema, schema.Name)
+			}
+			if err := validateIdentifier("view", view.Name); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateIdentifier(kind string, identifier string) error {
+	if identifier == "" {
+		return fmt.Errorf("invalid source catalog: %s identifier is empty", kind)
+	}
+	if len(identifier) > maxPostgresIdentifierBytes {
+		return fmt.Errorf(
+			"invalid source catalog: %s identifier %q is %d bytes; PostgreSQL supports at most %d bytes",
+			kind,
+			identifier,
+			len(identifier),
+			maxPostgresIdentifierBytes,
+		)
+	}
 	return nil
 }
 
@@ -846,7 +987,11 @@ func normalizeReferentialAction(rule string) string {
 }
 
 func validateViewDefinition(definition string) error {
-	upper := strings.ToUpper(sqlForValidation(definition))
+	validationSQL := sqlForValidation(definition)
+	if nextValueForPattern.MatchString(validationSQL) {
+		return fmt.Errorf("%w: contains %q", errUnsupportedViewDefinition, "NEXT VALUE FOR")
+	}
+	upper := strings.ToUpper(validationSQL)
 	unsupported := []string{
 		"TOP ",
 		"TOP(",
@@ -918,6 +1063,9 @@ func validateCheckConstraintDefinition(definition string) error {
 }
 
 func validateDefaultConstraintDefinition(definition string) error {
+	if nextValueForPattern.MatchString(sqlForValidation(definition)) {
+		return fmt.Errorf("%w: contains %q", errUnsupportedDefaultConstraintDefinition, "NEXT VALUE FOR")
+	}
 	if !isPortableDefaultConstraintDefinition(definition) {
 		upper := strings.ToUpper(sqlForValidation(definition))
 		for _, token := range []string{"TRY_CONVERT(", "TRY_CAST(", "CONVERT("} {
@@ -959,8 +1107,10 @@ func normalizeViewDefinition(view *catalog.View) (string, error) {
 func normalizeSQLExpression(expression string) string {
 	protected := sqlrewrite.Protect(expression, true)
 	normalized := protected.SQL
-	normalized = normalizeBracketIdentifiers(normalized)
 	normalized = collatePattern.ReplaceAllString(normalized, "")
+	normalized = normalizeBracketIdentifiers(normalized)
+	protectedIdentifiers := sqlrewrite.ProtectIdentifiers(normalized)
+	normalized = protectedIdentifiers.SQL
 	normalized = isNullPattern.ReplaceAllString(normalized, "COALESCE(")
 	normalized = getDatePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = getUTCDatePattern.ReplaceAllString(normalized, "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
@@ -985,7 +1135,7 @@ func normalizeSQLExpression(expression string) string {
 		}
 		normalized = next
 	}
-	return protected.Restore(normalized)
+	return protected.Restore(protectedIdentifiers.Restore(normalized))
 }
 
 func normalizeBracketIdentifiers(input string) string {
@@ -1056,7 +1206,9 @@ func translateDATEADD(s string) string {
 	if interval == "" {
 		return s
 	}
-	return fmt.Sprintf("(%s + (%s * INTERVAL '%s'))", expr, n, interval)
+	// SQL Server truncates a fractional DATEADD number; multiplying a
+	// PostgreSQL interval by it directly would retain the fraction.
+	return fmt.Sprintf("(%s + (TRUNC((%s)::numeric)::double precision * INTERVAL '%s'))", expr, n, interval)
 }
 
 func translateDATEDIFF(s string) string {
@@ -1217,47 +1369,7 @@ func isPortableIndexPredicate(predicate string) bool {
 		}
 	}
 
-	allowedFunctions := map[string]struct{}{
-		"ABS":             {},
-		"CASE":            {},
-		"CAST":            {},
-		"CEILING":         {},
-		"COALESCE":        {},
-		"CONCAT":          {},
-		"EXP":             {},
-		"EXTRACT":         {},
-		"FLOOR":           {},
-		"GEN_RANDOM_UUID": {},
-		"LEFT":            {},
-		"LENGTH":          {},
-		"LN":              {},
-		"LOWER":           {},
-		"LTRIM":           {},
-		"NULLIF":          {},
-		"OCTET_LENGTH":    {},
-		"OVERLAY":         {},
-		"PI":              {},
-		"POSITION":        {},
-		"POWER":           {},
-		"REPEAT":          {},
-		"RIGHT":           {},
-		"ROUND":           {},
-		"RTRIM":           {},
-		"SQRT":            {},
-		"SUBSTRING":       {},
-		"TRIM":            {},
-		"UPPER":           {},
-	}
-
-	for _, match := range sqlFunctionPattern.FindAllStringSubmatch(upper, -1) {
-		functionName := match[1]
-		if _, ok := allowedFunctions[functionName]; ok {
-			continue
-		}
-		return false
-	}
-
-	return true
+	return hasOnlyPortableFunctions(upper)
 }
 
 func isPortableCheckConstraintDefinition(definition string) bool {
@@ -1278,47 +1390,7 @@ func isPortableCheckConstraintDefinition(definition string) bool {
 		}
 	}
 
-	allowedFunctions := map[string]struct{}{
-		"ABS":             {},
-		"CASE":            {},
-		"CAST":            {},
-		"CEILING":         {},
-		"COALESCE":        {},
-		"CONCAT":          {},
-		"EXP":             {},
-		"EXTRACT":         {},
-		"FLOOR":           {},
-		"GEN_RANDOM_UUID": {},
-		"LEFT":            {},
-		"LENGTH":          {},
-		"LN":              {},
-		"LOWER":           {},
-		"LTRIM":           {},
-		"NULLIF":          {},
-		"OCTET_LENGTH":    {},
-		"OVERLAY":         {},
-		"PI":              {},
-		"POSITION":        {},
-		"POWER":           {},
-		"REPEAT":          {},
-		"RIGHT":           {},
-		"ROUND":           {},
-		"RTRIM":           {},
-		"SQRT":            {},
-		"SUBSTRING":       {},
-		"TRIM":            {},
-		"UPPER":           {},
-	}
-
-	for _, match := range sqlFunctionPattern.FindAllStringSubmatch(upper, -1) {
-		functionName := match[1]
-		if _, ok := allowedFunctions[functionName]; ok {
-			continue
-		}
-		return false
-	}
-
-	return true
+	return hasOnlyPortableFunctions(upper)
 }
 
 func isPortableDefaultConstraintDefinition(definition string) bool {
@@ -1334,42 +1406,13 @@ func isPortableDefaultConstraintDefinition(definition string) bool {
 		}
 	}
 
-	allowedFunctions := map[string]struct{}{
-		"ABS":               {},
-		"CASE":              {},
-		"CAST":              {},
-		"CEILING":           {},
-		"COALESCE":          {},
-		"CONCAT":            {},
-		"CURRENT_TIMESTAMP": {},
-		"EXP":               {},
-		"EXTRACT":           {},
-		"FLOOR":             {},
-		"GEN_RANDOM_UUID":   {},
-		"LEFT":              {},
-		"LENGTH":            {},
-		"LN":                {},
-		"LOWER":             {},
-		"LTRIM":             {},
-		"NULLIF":            {},
-		"OCTET_LENGTH":      {},
-		"OVERLAY":           {},
-		"PI":                {},
-		"POSITION":          {},
-		"POWER":             {},
-		"REPEAT":            {},
-		"RIGHT":             {},
-		"ROUND":             {},
-		"RTRIM":             {},
-		"SQRT":              {},
-		"SUBSTRING":         {},
-		"TRIM":              {},
-		"UPPER":             {},
-	}
+	return hasOnlyPortableFunctions(upper)
+}
 
-	for _, match := range sqlFunctionPattern.FindAllStringSubmatch(upper, -1) {
+func hasOnlyPortableFunctions(sql string) bool {
+	for _, match := range sqlFunctionPattern.FindAllStringSubmatch(sql, -1) {
 		functionName := match[1]
-		if _, ok := allowedFunctions[functionName]; ok {
+		if _, ok := portableSQLFunctions[functionName]; ok {
 			continue
 		}
 		return false
@@ -1379,7 +1422,7 @@ func isPortableDefaultConstraintDefinition(definition string) bool {
 }
 
 func sqlForValidation(sql string) string {
-	return sqlrewrite.Protect(sql, false).SQL
+	return sqlrewrite.ProtectIdentifiers(sql).SQL
 }
 
 func quoteIdentifier(identifier string) string {

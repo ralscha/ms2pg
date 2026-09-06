@@ -17,16 +17,26 @@ type Config struct {
 	TargetDSN      string
 	SchemaOnly     bool
 	Verbose        bool
+	ShowVersion    bool
 	IncludeSchemas []string
 	IncludeTables  []string
 	ExcludeSchemas []string
 	ExcludeTables  []string
 }
 
+// Version is replaced by GoReleaser for tagged builds.
+var Version = "dev"
+
 func Run(ctx context.Context, args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
+	}
+	if cfg.ShowVersion {
+		if _, err := fmt.Fprintln(os.Stdout, Version); err != nil {
+			return fmt.Errorf("write version: %w", err)
+		}
+		return nil
 	}
 
 	level := slog.LevelInfo
@@ -64,6 +74,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.TargetDSN, "target", "", "PostgreSQL connection string")
 	fs.BoolVar(&cfg.SchemaOnly, "schema-only", false, "create schemas, tables, and views without copying table data")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "enable debug logging")
+	fs.BoolVar(&cfg.ShowVersion, "version", false, "print version and exit")
 	includeSchemas := fs.String("include-schemas", "", "comma-separated schema filters; supports glob patterns")
 	includeTables := fs.String("include-tables", "", "comma-separated table/view filters; supports glob patterns and schema.name forms")
 	excludeSchemas := fs.String("exclude-schemas", "", "comma-separated schema filters to skip; supports glob patterns")
@@ -73,12 +84,14 @@ func parseConfig(args []string) (Config, error) {
 		return Config{}, err
 	}
 
-	if cfg.SourceDSN == "" || cfg.TargetDSN == "" {
-		return Config{}, errors.New("both -source and -target are required")
-	}
-
 	if len(fs.Args()) != 0 {
 		return Config{}, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if cfg.ShowVersion {
+		return cfg, nil
+	}
+	if cfg.SourceDSN == "" || cfg.TargetDSN == "" {
+		return Config{}, errors.New("both -source and -target are required")
 	}
 
 	cfg.IncludeSchemas = parseCSVList(*includeSchemas)

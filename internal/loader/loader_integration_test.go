@@ -518,7 +518,9 @@ func seedSourceSchema(ctx context.Context, t *testing.T, sourceDSN string) {
 			CONSTRAINT fk_order_regions_user_region FOREIGN KEY (user_id, region_code)
 				REFERENCES sales.user_regions(user_id, region_code) ON UPDATE CASCADE
 		)`,
-		`INSERT INTO dbo.users (name, city) VALUES ('Ada Lovelace', 'London'), ('Grace Hopper', 'New York')`,
+		`INSERT INTO dbo.users (name, city, external_id) VALUES
+			('Ada Lovelace', 'London', 'FF19966F-868B-11D0-B42D-00C04FC964FF'),
+			('Grace Hopper', 'New York', NEWID())`,
 		`INSERT INTO sales.orders (user_id, order_ref) VALUES (1, 'A-100'), (2, 'G-200')`,
 		`INSERT INTO sales.user_regions (user_id, region_code, label) VALUES (1, 'EU', 'Europe'), (2, 'US', 'United States')`,
 		`INSERT INTO sales.order_regions (user_id, region_code, note) VALUES (1, 'EU', 'priority'), (2, 'US', 'standard')`,
@@ -1055,28 +1057,6 @@ func assertFilteredIndexes(ctx context.Context, t *testing.T, targetDSN string) 
 	}
 }
 
-func assertSkippedIndexAbsent(ctx context.Context, t *testing.T, targetDSN string, schema string, table string, indexName string) {
-	t.Helper()
-
-	pool, err := pgxpool.New(ctx, targetDSN)
-	if err != nil {
-		t.Fatalf("connect target for skipped index assertions: %v", err)
-	}
-	defer pool.Close()
-
-	var exists bool
-	if err := pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_indexes
-			WHERE schemaname = $1 AND tablename = $2 AND indexname = $3
-		)`, schema, table, indexName).Scan(&exists); err != nil {
-		t.Fatalf("query skipped index %s.%s.%s: %v", schema, table, indexName, err)
-	}
-	if exists {
-		t.Fatalf("index %s.%s.%s unexpectedly exists after migration", schema, table, indexName)
-	}
-}
-
 func assertFilteredObjectsAbsent(ctx context.Context, t *testing.T, targetDSN string) {
 	t.Helper()
 
@@ -1369,7 +1349,8 @@ func assertTargetTableRows(ctx context.Context, t *testing.T, targetDSN string) 
 
 	var name string
 	var city *string
-	if err := pool.QueryRow(ctx, `SELECT name, city FROM "dbo"."users" WHERE id = 1`).Scan(&name, &city); err != nil {
+	var externalID string
+	if err := pool.QueryRow(ctx, `SELECT name, city, external_id::text FROM "dbo"."users" WHERE id = 1`).Scan(&name, &city, &externalID); err != nil {
 		t.Fatalf("query migrated user: %v", err)
 	}
 	if name != "Ada Lovelace" {
@@ -1377,6 +1358,9 @@ func assertTargetTableRows(ctx context.Context, t *testing.T, targetDSN string) 
 	}
 	if city == nil || *city != "London" {
 		t.Fatalf("migrated user city = %v, want London", city)
+	}
+	if externalID != "ff19966f-868b-11d0-b42d-00c04fc964ff" {
+		t.Fatalf("migrated user external ID = %q, want canonical UUID", externalID)
 	}
 }
 

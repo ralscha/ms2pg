@@ -16,6 +16,17 @@ type Protected struct {
 }
 
 func Protect(input string, normalizeNationalStrings bool) Protected {
+	return protect(input, normalizeNationalStrings, false)
+}
+
+// ProtectIdentifiers additionally protects double-quoted identifiers. It is
+// intended for validation or for rewrites after bracketed MSSQL identifiers
+// have been converted to PostgreSQL identifiers.
+func ProtectIdentifiers(input string) Protected {
+	return protect(input, false, true)
+}
+
+func protect(input string, normalizeNationalStrings bool, protectQuotedIdentifiers bool) Protected {
 	prefix := "\x00ms2pg_protected_"
 	for strings.Contains(input, prefix) {
 		prefix += "_"
@@ -27,6 +38,24 @@ func Protect(input string, normalizeNationalStrings bool) Protected {
 
 	for index := 0; index < len(input); {
 		start := index
+		if protectQuotedIdentifiers && input[index] == '"' {
+			index++
+			for index < len(input) {
+				if input[index] != '"' {
+					index++
+					continue
+				}
+				index++
+				if index < len(input) && input[index] == '"' {
+					index++
+					continue
+				}
+				break
+			}
+			protected.add(&output, input[start:index])
+			continue
+		}
+
 		nationalString := false
 		if normalizeNationalStrings && (input[index] == 'N' || input[index] == 'n') &&
 			index+1 < len(input) && input[index+1] == '\'' &&

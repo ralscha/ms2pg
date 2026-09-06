@@ -731,6 +731,11 @@ func selectExpression(column *catalog.Column) string {
 	name := quoteIdentifier(column.Name)
 	var expression string
 	switch strings.ToLower(column.SourceType) {
+	case "uniqueidentifier":
+		// go-mssqldb can return UUID bytes in either SQL Server or RFC 4122
+		// byte order depending on the connection's guid conversion setting.
+		// Copy the canonical textual form so the result is deterministic.
+		expression = fmt.Sprintf("CONVERT(char(36), %s)", name)
 	case "datetimeoffset":
 		expression = fmt.Sprintf("CONVERT(varchar(35), %s, 127)", name)
 	case "datetime", "datetime2", "smalldatetime":

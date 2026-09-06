@@ -14,6 +14,11 @@ func TestSelectExpressionUsesMSSQLTemporalFormatting(t *testing.T) {
 		want   string
 	}{
 		{
+			name:   "uniqueidentifier",
+			column: &catalog.Column{Name: "external_id", SourceType: "uniqueidentifier"},
+			want:   "CONVERT(char(36), [external_id]) AS [external_id]",
+		},
+		{
 			name:   "datetime2",
 			column: &catalog.Column{Name: "created_at", SourceType: "datetime2"},
 			want:   "CONVERT(varchar(30), [created_at], 126) AS [created_at]",

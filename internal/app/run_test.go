@@ -12,6 +12,23 @@ func TestParseConfigHelp(t *testing.T) {
 	}
 }
 
+func TestParseConfigVersionDoesNotRequireConnections(t *testing.T) {
+	cfg, err := parseConfig([]string{"-version"})
+	if err != nil {
+		t.Fatalf("parseConfig(-version) returned error: %v", err)
+	}
+	if !cfg.ShowVersion {
+		t.Fatal("ShowVersion = false, want true")
+	}
+}
+
+func TestParseConfigRejectsUnexpectedArgumentsBeforeConnections(t *testing.T) {
+	_, err := parseConfig([]string{"unexpected"})
+	if err == nil || err.Error() != "unexpected arguments: [unexpected]" {
+		t.Fatalf("parseConfig(unexpected) error = %v, want unexpected arguments error", err)
+	}
+}
+
 func TestParseConfigParsesFilterFlags(t *testing.T) {
 	cfg, err := parseConfig([]string{
 		"-source", "sqlserver://example",
