@@ -129,7 +129,7 @@ func (filters Filters) Validate() error {
 func (db *Database) SortedSchemas() []*Schema {
 	schemas := slices.Clone(db.Schemas)
 	slices.SortFunc(schemas, func(left, right *Schema) int {
-		return compare(left.Name, right.Name)
+		return strings.Compare(left.Name, right.Name)
 	})
 	return schemas
 }
@@ -137,7 +137,7 @@ func (db *Database) SortedSchemas() []*Schema {
 func (schema *Schema) SortedTables() []*Table {
 	tables := slices.Clone(schema.Tables)
 	slices.SortFunc(tables, func(left, right *Table) int {
-		return compare(left.Name, right.Name)
+		return strings.Compare(left.Name, right.Name)
 	})
 	return tables
 }
@@ -145,19 +145,9 @@ func (schema *Schema) SortedTables() []*Table {
 func (schema *Schema) SortedViews() []*View {
 	views := slices.Clone(schema.Views)
 	slices.SortFunc(views, func(left, right *View) int {
-		return compare(left.Name, right.Name)
+		return strings.Compare(left.Name, right.Name)
 	})
 	return views
-}
-
-func compare(left, right string) int {
-	if left < right {
-		return -1
-	}
-	if left > right {
-		return 1
-	}
-	return 0
 }
 
 func (filters Filters) MatchesSchema(schema string) bool {

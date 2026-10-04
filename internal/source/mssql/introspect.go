@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -202,7 +202,7 @@ func (source *Source) Ping(ctx context.Context) error {
 func (source *Source) Introspect(ctx context.Context, filters catalog.Filters) (*catalog.Database, error) {
 	database := &catalog.Database{}
 	schemas := make(map[string]*catalog.Schema)
-	tables := make(map[string]*catalog.Table)
+	tables := make(map[[2]string]*catalog.Table)
 
 	if err := source.loadTables(ctx, filters, schemas, tables); err != nil {
 		return nil, err
@@ -238,8 +238,8 @@ func (source *Source) Introspect(ctx context.Context, filters catalog.Filters) (
 	for _, schema := range schemas {
 		database.Schemas = append(database.Schemas, schema)
 	}
-	sort.Slice(database.Schemas, func(i, j int) bool {
-		return database.Schemas[i].Name < database.Schemas[j].Name
+	slices.SortFunc(database.Schemas, func(left, right *catalog.Schema) int {
+		return strings.Compare(left.Name, right.Name)
 	})
 
 	return database, nil
@@ -291,7 +291,7 @@ func (source *Source) StreamTable(ctx context.Context, table *catalog.Table, han
 	return nil
 }
 
-func (source *Source) loadTables(ctx context.Context, filters catalog.Filters, schemas map[string]*catalog.Schema, tables map[string]*catalog.Table) error {
+func (source *Source) loadTables(ctx context.Context, filters catalog.Filters, schemas map[string]*catalog.Schema, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, tablesQuery)
 	if err != nil {
 		return fmt.Errorf("query tables: %w", err)
@@ -322,7 +322,7 @@ func (source *Source) loadTables(ctx context.Context, filters catalog.Filters, s
 	return rows.Err()
 }
 
-func (source *Source) loadColumns(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadColumns(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, columnsQuery)
 	if err != nil {
 		return fmt.Errorf("query columns: %w", err)
@@ -373,7 +373,7 @@ func (source *Source) loadColumns(ctx context.Context, tables map[string]*catalo
 	return rows.Err()
 }
 
-func (source *Source) loadPrimaryKeys(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadPrimaryKeys(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, primaryKeysQuery)
 	if err != nil {
 		return fmt.Errorf("query primary keys: %w", err)
@@ -432,7 +432,7 @@ func (source *Source) loadViews(ctx context.Context, filters catalog.Filters, sc
 	return rows.Err()
 }
 
-func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadIndexes(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, indexesQuery)
 	if err != nil {
 		return fmt.Errorf("query indexes: %w", err)
@@ -441,7 +441,7 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 		_ = rows.Close()
 	}()
 
-	indexMap := make(map[string]*catalog.Index)
+	indexMap := make(map[[3]string]*catalog.Index)
 
 	for rows.Next() {
 		var schemaName string
@@ -484,7 +484,7 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 			continue
 		}
 
-		mapKey := tableKey(schemaName, tableName) + "." + indexName
+		mapKey := [3]string{schemaName, tableName, indexName}
 		index := indexMap[mapKey]
 		if index == nil {
 			index = &catalog.Index{Name: indexName, SourceType: sourceType, Disabled: disabled, Unique: unique, Predicate: filterDefinition}
@@ -505,7 +505,7 @@ func (source *Source) loadIndexes(ctx context.Context, tables map[string]*catalo
 	return rows.Err()
 }
 
-func (source *Source) loadIdentityColumns(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadIdentityColumns(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, identityColumnsQuery)
 	if err != nil {
 		return fmt.Errorf("query identity columns: %w", err)
@@ -541,7 +541,7 @@ func (source *Source) loadIdentityColumns(ctx context.Context, tables map[string
 	return rows.Err()
 }
 
-func (source *Source) loadUniqueConstraints(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadUniqueConstraints(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, uniqueConstraintsQuery)
 	if err != nil {
 		return fmt.Errorf("query unique constraints: %w", err)
@@ -550,7 +550,7 @@ func (source *Source) loadUniqueConstraints(ctx context.Context, tables map[stri
 		_ = rows.Close()
 	}()
 
-	constraintMap := make(map[string]*catalog.UniqueConstraint)
+	constraintMap := make(map[[3]string]*catalog.UniqueConstraint)
 
 	for rows.Next() {
 		var schemaName string
@@ -568,7 +568,7 @@ func (source *Source) loadUniqueConstraints(ctx context.Context, tables map[stri
 			continue
 		}
 
-		mapKey := tableKey(schemaName, tableName) + "." + constraintName
+		mapKey := [3]string{schemaName, tableName, constraintName}
 		constraint := constraintMap[mapKey]
 		if constraint == nil {
 			constraint = &catalog.UniqueConstraint{Name: constraintName}
@@ -581,7 +581,7 @@ func (source *Source) loadUniqueConstraints(ctx context.Context, tables map[stri
 	return rows.Err()
 }
 
-func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadForeignKeys(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, foreignKeysQuery)
 	if err != nil {
 		return fmt.Errorf("query foreign keys: %w", err)
@@ -590,7 +590,7 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 		_ = rows.Close()
 	}()
 
-	foreignKeyMap := make(map[string]*catalog.ForeignKey)
+	foreignKeyMap := make(map[[3]string]*catalog.ForeignKey)
 
 	for rows.Next() {
 		var name string
@@ -627,7 +627,7 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 			continue
 		}
 
-		mapKey := tableKey(schemaName, tableName) + "." + name
+		mapKey := [3]string{schemaName, tableName, name}
 		foreignKey := foreignKeyMap[mapKey]
 		if foreignKey == nil {
 			foreignKey = &catalog.ForeignKey{
@@ -649,7 +649,7 @@ func (source *Source) loadForeignKeys(ctx context.Context, tables map[string]*ca
 	return rows.Err()
 }
 
-func (source *Source) loadCheckConstraints(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadCheckConstraints(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, checkConstraintsQuery)
 	if err != nil {
 		return fmt.Errorf("query check constraints: %w", err)
@@ -685,7 +685,7 @@ func (source *Source) loadCheckConstraints(ctx context.Context, tables map[strin
 	return rows.Err()
 }
 
-func (source *Source) loadDefaultConstraints(ctx context.Context, tables map[string]*catalog.Table) error {
+func (source *Source) loadDefaultConstraints(ctx context.Context, tables map[[2]string]*catalog.Table) error {
 	rows, err := source.db.QueryContext(ctx, defaultConstraintsQuery)
 	if err != nil {
 		return fmt.Errorf("query default constraints: %w", err)
@@ -837,8 +837,8 @@ func normalizeTemporalValue(column *catalog.Column, value string) (any, bool) {
 	return nil, false
 }
 
-func tableKey(schemaName, tableName string) string {
-	return schemaName + "." + tableName
+func tableKey(schemaName, tableName string) [2]string {
+	return [2]string{schemaName, tableName}
 }
 
 func quoteQualified(schemaName, objectName string) string {

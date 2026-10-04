@@ -89,7 +89,7 @@ func TestRenderCreateDefaultConstraintTranslatesConvert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderCreateDefaultConstraint returned error: %v", err)
 	}
-	want := `ALTER TABLE "dbo"."users" ALTER COLUMN "city" SET DEFAULT ('London')::text`
+	want := `ALTER TABLE "dbo"."users" ALTER COLUMN "city" SET DEFAULT ('London')::varchar(100)`
 	if statement != want {
 		t.Fatalf("renderCreateDefaultConstraint() = %q, want %q", statement, want)
 	}
@@ -261,7 +261,7 @@ func TestRenderCreateIndexTranslatesCastPredicateType(t *testing.T) {
 		Predicate: `city = CAST(N'London' AS nvarchar(100))`,
 	}
 
-	want := `CREATE INDEX "idx_users_city_cast" ON "dbo"."users" ("name") WHERE city = CAST('London' AS text)`
+	want := `CREATE INDEX "idx_users_city_cast" ON "dbo"."users" ("name") WHERE city = CAST('London' AS varchar(100))`
 	if got := renderCreateIndex(table, index); got != want {
 		t.Fatalf("renderCreateIndex() = %q, want %q", got, want)
 	}
@@ -529,7 +529,7 @@ func TestRenderCreateCheckConstraintTranslatesConvert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderCreateCheckConstraint returned error: %v", err)
 	}
-	want := `ALTER TABLE "dbo"."users" ADD CONSTRAINT "ck_users_city_convert" CHECK ((city = ('London')::text))`
+	want := `ALTER TABLE "dbo"."users" ADD CONSTRAINT "ck_users_city_convert" CHECK ((city = ('London')::varchar(100)))`
 	if statement != want {
 		t.Fatalf("renderCreateCheckConstraint() = %q, want %q", statement, want)
 	}
@@ -791,13 +791,13 @@ func TestNormalizeSQLExpressionTranslatesSpace(t *testing.T) {
 
 func TestNormalizeSQLExpressionTranslatesConvertSimple(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{`CONVERT(varchar, [col])`, `("col")::text`},
+		{`CONVERT(varchar, [col])`, `("col")::varchar(30)`},
 		{`CONVERT(int, [score])`, `("score")::integer`},
 		{`CONVERT(bigint, [score])`, `("score")::bigint`},
 		{`CONVERT(date, [created_at])`, `("created_at")::date`},
 		{`CONVERT(datetime, [ts])`, `("ts")::timestamp`},
 		{`CONVERT(float, [val])`, `("val")::double precision`},
-		{`CONVERT(numeric(18,2), [amount])`, `("amount")::numeric`},
+		{`CONVERT(numeric(18,2), [amount])`, `("amount")::numeric(18,2)`},
 	}
 	for _, tc := range cases {
 		if got := normalizeSQLExpression(tc.in); got != tc.want {
@@ -936,8 +936,8 @@ func TestNormalizeSQLExpressionDateDiffQuarter(t *testing.T) {
 
 func TestNormalizeSQLExpressionTranslatesCastMSSQLTypes(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{`CAST([col] AS nvarchar)`, `CAST("col" AS text)`},
-		{`CAST([col] AS nvarchar(50))`, `CAST("col" AS text)`},
+		{`CAST([col] AS nvarchar)`, `CAST("col" AS varchar(30))`},
+		{`CAST([col] AS nvarchar(50))`, `CAST("col" AS varchar(50))`},
 		{`CAST([col] AS nvarchar(max))`, `CAST("col" AS text)`},
 		{`CAST([ts] AS datetime)`, `CAST("ts" AS timestamp)`},
 		{`CAST([ts] AS datetime2)`, `CAST("ts" AS timestamp)`},
@@ -945,8 +945,8 @@ func TestNormalizeSQLExpressionTranslatesCastMSSQLTypes(t *testing.T) {
 		{`CAST([id] AS uniqueidentifier)`, `CAST("id" AS uuid)`},
 		{`CAST([n] AS tinyint)`, `CAST("n" AS smallint)`},
 		{`CAST([b] AS bit)`, `CAST("b" AS boolean)`},
-		{`CAST([amt] AS money)`, `CAST("amt" AS numeric)`},
-		{`CAST([name] AS sysname)`, `CAST("name" AS text)`},
+		{`CAST([amt] AS money)`, `CAST("amt" AS numeric(19,4))`},
+		{`CAST([name] AS sysname)`, `CAST("name" AS varchar(128))`},
 	}
 	for _, tc := range cases {
 		if got := normalizeSQLExpression(tc.in); got != tc.want {
@@ -957,8 +957,94 @@ func TestNormalizeSQLExpressionTranslatesCastMSSQLTypes(t *testing.T) {
 
 func TestNormalizeSQLExpressionTranslatesNestedCast(t *testing.T) {
 	input := `CAST(CAST([col] AS nvarchar) AS datetime)`
-	want := `CAST(CAST("col" AS text) AS timestamp)`
+	want := `CAST(CAST("col" AS varchar(30)) AS timestamp)`
 	if got := normalizeSQLExpression(input); got != want {
 		t.Fatalf("normalizeSQLExpression(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestNormalizeSQLExpressionNestedArguments(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{`IIF([x] > 0, COALESCE([a], [b]), LOWER([c]))`, `CASE WHEN "x" > 0 THEN COALESCE("a", "b") ELSE LOWER("c") END`},
+		{`LEN(COALESCE([name], N''))`, `LENGTH(RTRIM(COALESCE("name", '')))`},
+		{`CHARINDEX('a', LOWER([name]))`, `POSITION('a' IN LOWER("name"))`},
+		{`CONVERT(int, COALESCE([a], [b]))`, `(COALESCE("a", "b"))::integer`},
+		{`LOG(ABS([value]))`, `LN(ABS("value"))`},
+		{`IIF([x] > 0, IIF([y] > 0, 1, 2), 3)`, `CASE WHEN "x" > 0 THEN CASE WHEN "y" > 0 THEN 1 ELSE 2 END ELSE 3 END`},
+		{`DATEDIFF(day, COALESCE([started], [created]), [ended])`, `(("ended")::date - (COALESCE("started", "created"))::date)`},
+		{`DATEADD(day, COALESCE([days], 1), [created])`, `("created" + (TRUNC((COALESCE("days", 1))::numeric)::double precision * INTERVAL '1 day'))`},
+		{`STUFF(COALESCE([name], N''), 2, 1, LOWER(N'X'))`, `OVERLAY(COALESCE("name", '') PLACING LOWER('X') FROM 2 FOR 1)`},
+		{`SPACE(LEN([name]))`, `REPEAT(' ', LENGTH(RTRIM("name")))`},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			if got := normalizeSQLExpression(test.input); got != test.want {
+				t.Fatalf("normalizeSQLExpression() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRenderCreateViewPreservesMultilineLiteral(t *testing.T) {
+	literal := "'first\r\nGO\r\n\r\nSET ANSI_NULLS ON\r\nlast'"
+	view := &catalog.View{Schema: "dbo", Name: "multiline", Definition: "SET ANSI_NULLS ON\r\nGO\r\nCREATE VIEW dbo.multiline AS SELECT " + literal + " AS [value]"}
+	statement, err := renderCreateView(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statement, literal) {
+		t.Fatalf("view changed literal contents: %q", statement)
+	}
+}
+
+func TestValidationRejectsSpacedUnsupportedFunctions(t *testing.T) {
+	for _, expression := range []string{"TRY_CONVERT (int, [x])", "CHARINDEX\n('a', [x], 2)", "LOG\t(8, 2)", "TRY_CONVERT/* comment */(int, [x])", "CONVERT(varchar(10), COALESCE([x], [y]), 120)"} {
+		view := &catalog.View{Schema: "dbo", Name: "unsupported", Definition: "CREATE VIEW dbo.unsupported AS SELECT " + expression + " AS [value]"}
+		if _, err := renderCreateView(view); !errors.Is(err, errUnsupportedViewDefinition) {
+			t.Errorf("renderCreateView(%q) error = %v, want unsupported definition", expression, err)
+		}
+	}
+	for _, expression := range []string{"dbo.custom_function (1)", "SUSER_SNAME ()"} {
+		if err := validateDefaultConstraintDefinition(expression); err == nil {
+			t.Errorf("validateDefaultConstraintDefinition(%q) accepted unsupported function", expression)
+		}
+	}
+}
+
+func TestNormalizeSQLExpressionPreservesCastParameters(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{`CONVERT(numeric(18,2), [amount])`, `("amount")::numeric(18,2)`},
+		{`CAST([name] AS nvarchar(5))`, `CAST("name" AS varchar(5))`},
+		{`CONVERT(nvarchar, [name])`, `("name")::varchar(30)`},
+		{`CAST([ts] AS datetime2(3))`, `CAST("ts" AS timestamp(3))`},
+		{`CONVERT(float(24), [n])`, `("n")::real`},
+		{"CAST(([n] + 1)\nAS\tnvarchar(10))", `CAST(("n" + 1) AS varchar(10))`},
+	} {
+		if got := normalizeSQLExpression(test.input); got != test.want {
+			t.Errorf("normalizeSQLExpression(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
+func TestValidationAllowsParenthesizedSQLKeywords(t *testing.T) {
+	if err := validateCheckConstraintDefinition(`("a" > 0) AND ("b" IN (1, 2))`); err != nil {
+		t.Fatalf("portable check rejected: %v", err)
+	}
+	view := &catalog.View{Schema: "dbo", Name: "topics", Definition: `CREATE VIEW dbo.topics AS SELECT topic FROM dbo.messages`}
+	if _, err := renderCreateView(view); err != nil {
+		t.Fatalf("portable identifier rejected as TOP: %v", err)
+	}
+}
+
+func TestNormalizeSQLExpressionPreservesSpecialIdentifiers(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{`[it's] + LEN([name])`, `"it's" + LENGTH(RTRIM("name"))`},
+		{`[a--b] + GETDATE()`, `"a--b" + CURRENT_TIMESTAMP`},
+		{`"[name]" + GETDATE()`, `"[name]" + CURRENT_TIMESTAMP`},
+		{`[COLLATE Latin1] + GETDATE()`, `"COLLATE Latin1" + CURRENT_TIMESTAMP`},
+	} {
+		if got := normalizeSQLExpression(test.input); got != test.want {
+			t.Errorf("normalizeSQLExpression(%q) = %q, want %q", test.input, got, test.want)
+		}
 	}
 }

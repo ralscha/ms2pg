@@ -144,3 +144,9 @@ func sameTemporalValue(got any, want any) bool {
 
 	return got == want
 }
+
+func TestTableKeyDistinguishesDottedNames(t *testing.T) {
+	if tableKey("a.b", "c") == tableKey("a", "b.c") {
+		t.Fatal("distinct schema/table pairs have the same catalog key")
+	}
+}

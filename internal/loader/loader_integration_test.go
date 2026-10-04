@@ -73,6 +73,66 @@ func TestRunnerMigratesTablesAndViewsWithContainers(t *testing.T) {
 	assertGeneratedTokenViewRows(ctx, t, targetDSN)
 }
 
+func TestRunnerPreservesDottedNamesAndSQLExpressions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed integration test in short mode")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
+	defer cancel()
+	mssqlContainer := startMSSQLContainer(ctx, t)
+	postgresContainer := startPostgresContainer(ctx, t)
+	adminDSN := buildMSSQLDSN(t, ctx, mssqlContainer, "master")
+	mustExecMSSQL(ctx, t, adminDSN, "CREATE DATABASE [ms2pg_expressions_it]")
+	sourceDSN := buildMSSQLDSN(t, ctx, mssqlContainer, "ms2pg_expressions_it")
+	literal := "'first\r\nGO\r\n\r\nSET ANSI_NULLS ON\r\nlast'"
+	for _, statement := range []string{
+		`CREATE SCHEMA [a.b]`,
+		`CREATE SCHEMA [a]`,
+		`CREATE TABLE [a.b].[c] ([id] int NOT NULL, [it's] nvarchar(10)); INSERT INTO [a.b].[c] VALUES (1, N'first')`,
+		`CREATE TABLE [a].[b.c] ([id] int NOT NULL); INSERT INTO [a].[b.c] VALUES (2)`,
+		`CREATE TABLE [a].[b] ([id] int NOT NULL); INSERT INTO [a].[b] VALUES (3)`,
+		`CREATE INDEX [d] ON [a].[b.c] ([id])`,
+		`CREATE INDEX [c.d] ON [a].[b] ([id])`,
+		`CREATE VIEW dbo.expressions AS SELECT IIF(1 = 1, IIF(2 = 2, 7, 8), 9) AS nested_value,
+			CONVERT(numeric(10,2), 1.239) AS rounded_value,
+			CAST(N'abcdef' AS nvarchar(3)) AS short_value,
+			LEN(COALESCE(N'abc ', N'')) AS trimmed_length, ` + literal + ` AS multiline_value`,
+	} {
+		mustExecMSSQL(ctx, t, sourceDSN, statement)
+	}
+	targetDSN := buildPostgresDSN(t, ctx, postgresContainer, postgresDB)
+	runner := loader.Runner{Config: loader.Config{SourceDSN: sourceDSN, TargetDSN: targetDSN}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(ctx, targetDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{`SELECT id FROM "a.b"."c"`, 1},
+		{`SELECT id FROM "a"."b.c"`, 2},
+		{`SELECT id FROM "a"."b"`, 3},
+	} {
+		var got int
+		if err := pool.QueryRow(ctx, test.query).Scan(&got); err != nil || got != test.want {
+			t.Fatalf("%s: got %d, error %v; want %d", test.query, got, err, test.want)
+		}
+	}
+	var nested, length int
+	var rounded, shortened, multiline string
+	if err := pool.QueryRow(ctx, `SELECT nested_value, rounded_value::text, short_value, trimmed_length, multiline_value FROM dbo.expressions`).Scan(&nested, &rounded, &shortened, &length, &multiline); err != nil {
+		t.Fatal(err)
+	}
+	if nested != 7 || rounded != "1.24" || shortened != "abc" || length != 3 || multiline != strings.Trim(literal, "'") {
+		t.Fatalf("migrated expression values = %d, %q, %q, %d, %q", nested, rounded, shortened, length, multiline)
+	}
+}
+
 func TestRunnerFailsClearlyForUnsupportedViewDefinitions(t *testing.T) {
 	testCases := []struct {
 		name           string

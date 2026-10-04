@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"ms2pg/internal/catalog"
 	"ms2pg/internal/mapping"
@@ -166,21 +167,18 @@ func mapCatalog(database *catalog.Database) error {
 }
 
 func filterForeignKeys(database *catalog.Database) {
-	tableSet := make(map[string]struct{})
+	tableSet := make(map[[2]string]struct{})
 	for _, schema := range database.Schemas {
 		for _, table := range schema.Tables {
-			tableSet[table.Schema+"."+table.Name] = struct{}{}
+			tableSet[[2]string{table.Schema, table.Name}] = struct{}{}
 		}
 	}
 	for _, schema := range database.Schemas {
 		for _, table := range schema.Tables {
-			kept := table.ForeignKeys[:0]
-			for _, fk := range table.ForeignKeys {
-				if _, ok := tableSet[fk.ReferencedSchema+"."+fk.ReferencedTable]; ok {
-					kept = append(kept, fk)
-				}
-			}
-			table.ForeignKeys = kept
+			table.ForeignKeys = slices.DeleteFunc(table.ForeignKeys, func(fk *catalog.ForeignKey) bool {
+				_, included := tableSet[[2]string{fk.ReferencedSchema, fk.ReferencedTable}]
+				return !included
+			})
 		}
 	}
 }

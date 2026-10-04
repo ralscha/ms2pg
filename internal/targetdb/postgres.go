@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -25,36 +26,45 @@ var errInvalidUniqueConstraint = errors.New("invalid unique constraint metadata"
 const maxPostgresIdentifierBytes = 63
 
 var (
-	viewHeaderPattern    = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+VIEW\s+(?:(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)\s*\.\s*)?(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)(\s*\([^)]*\))?(?:\s+WITH\s+SCHEMABINDING)?\s+AS\b`)
-	setDirectivePattern  = regexp.MustCompile(`(?i)^SET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)\s*;?$`)
-	isNullPattern        = regexp.MustCompile(`(?i)\bISNULL\s*\(`)
-	getDatePattern       = regexp.MustCompile(`(?i)\b(GETDATE|SYSDATETIME)\b\s*\(\s*\)`)
-	getUTCDatePattern    = regexp.MustCompile(`(?i)\b(GETUTCDATE|SYSUTCDATETIME)\b\s*\(\s*\)`)
-	getOffsetDatePattern = regexp.MustCompile(`(?i)\bSYSDATETIMEOFFSET\b\s*\(\s*\)`)
-	newIDPattern         = regexp.MustCompile(`(?i)\b(NEWID|NEWSEQUENTIALID)\b\s*\(\s*\)`)
-	lenPattern           = regexp.MustCompile(`(?i)\bLEN\s*\(\s*([^)]+?)\s*\)`)
-	dataLengthPattern    = regexp.MustCompile(`(?i)\bDATALENGTH\s*\(`)
-	charIndexPattern     = regexp.MustCompile(`(?i)\bCHARINDEX\s*\(\s*([^,]+?)\s*,\s*([^,)]+?)\s*\)`)
-	dateAddPattern       = regexp.MustCompile(`(?i)\bDATEADD\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	dateDiffPattern      = regexp.MustCompile(`(?i)\bDATEDIFF\s*\(\s*(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|hour|hh|minute|mi|n|second|ss|s|millisecond|ms)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	iifPattern           = regexp.MustCompile(`(?i)\bIIF\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)`)
-	stuffPattern         = regexp.MustCompile(`(?i)\bSTUFF\s*\(\s*([^,]+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^)]+?)\s*\)`)
-	collatePattern       = regexp.MustCompile(`(?i)\bCOLLATE\s+(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z0-9_]+)`)
-	replicatePattern     = regexp.MustCompile(`(?i)\bREPLICATE\s*\(`)
-	spacePattern         = regexp.MustCompile(`(?i)\bSPACE\s*\(\s*([^)]+?)\s*\)`)
-	convertSafePattern   = regexp.MustCompile(`(?i)\bCONVERT\s*\(\s*(varchar|nvarchar|nchar|char|text|ntext|uniqueidentifier|sysname|money|smallmoney|integer|int|bigint|smallint|tinyint|float|real|bit|date|datetime2|smalldatetime|datetime|datetimeoffset|numeric|decimal)\s*(?:\(\s*[\d,\s]+\s*\))?\s*,\s*([^,)]+?)\s*\)`)
-	logSingleArgPattern  = regexp.MustCompile(`(?i)\bLOG\s*\(\s*([^,)]+?)\s*\)`)
-	castTypePattern      = regexp.MustCompile(`(?i)\bCAST\s*\(\s*(.+?)\s+AS\s+(datetimeoffset|datetime2|smalldatetime|datetime|smallmoney|money|uniqueidentifier|sysname|nvarchar|nchar|ntext|tinyint|bit)\s*(?:\([^)]*\))?\s*\)`)
-	nextValueForPattern  = regexp.MustCompile(`(?i)\bNEXT\s+VALUE\s+FOR\b`)
-	sqlFunctionPattern   = regexp.MustCompile(`(?i)\b([A-Z_][A-Z0-9_]*)\(`)
-	hexLiteralPattern    = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
-	portableSQLFunctions = map[string]struct{}{
+	castTargetTypePattern  = regexp.MustCompile(`(?i)^([a-z][a-z0-9]*)(?:\s*\(\s*([a-z0-9,\s]+)\s*\))?$`)
+	numericModifierPattern = regexp.MustCompile(`^[0-9]+(?:,[0-9]+)?$`)
+	viewHeaderPattern      = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+VIEW\s+(?:(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)\s*\.\s*)?(?:\[(?:[^\]]|\]\])+\]|"(?:""|[^"])+"|[A-Z_@#][A-Z0-9_@$#]*)(\s*\([^)]*\))?(?:\s+WITH\s+SCHEMABINDING)?\s+AS\b`)
+	setDirectivePattern    = regexp.MustCompile(`(?i)^SET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)\s*;?$`)
+	isNullPattern          = regexp.MustCompile(`(?i)\bISNULL\s*\(`)
+	getDatePattern         = regexp.MustCompile(`(?i)\b(GETDATE|SYSDATETIME)\b\s*\(\s*\)`)
+	getUTCDatePattern      = regexp.MustCompile(`(?i)\b(GETUTCDATE|SYSUTCDATETIME)\b\s*\(\s*\)`)
+	getOffsetDatePattern   = regexp.MustCompile(`(?i)\bSYSDATETIMEOFFSET\b\s*\(\s*\)`)
+	newIDPattern           = regexp.MustCompile(`(?i)\b(NEWID|NEWSEQUENTIALID)\b\s*\(\s*\)`)
+	dataLengthPattern      = regexp.MustCompile(`(?i)\bDATALENGTH\s*\(`)
+	collatePattern         = regexp.MustCompile(`(?i)\bCOLLATE\s+(?:\x00ms2pg_protected_+\d+\x00|[A-Z0-9_]+)`)
+	replicatePattern       = regexp.MustCompile(`(?i)\bREPLICATE\s*\(`)
+	nextValueForPattern    = regexp.MustCompile(`(?i)\bNEXT\s+VALUE\s+FOR\b`)
+	sqlFunctionPattern     = regexp.MustCompile(`(?i)\b([A-Z_][A-Z0-9_]*)\s*\(`)
+	unsignedIntegerPattern = regexp.MustCompile(`^[0-9]+$`)
+	hexLiteralPattern      = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
+	portableSQLFunctions   = map[string]struct{}{
+		// SQL keywords and type modifiers also precede parentheses.
+		"AND":             {},
+		"OR":              {},
+		"NOT":             {},
+		"IN":              {},
+		"AS":              {},
+		"WHEN":            {},
+		"THEN":            {},
+		"ELSE":            {},
+		"NUMERIC":         {},
+		"VARCHAR":         {},
+		"CHAR":            {},
+		"TIMESTAMP":       {},
+		"TIMESTAMPTZ":     {},
+		"TIME":            {},
 		"ABS":             {},
 		"CASE":            {},
 		"CAST":            {},
 		"CEILING":         {},
 		"COALESCE":        {},
 		"CONCAT":          {},
+		"DATE_TRUNC":      {},
 		"EXP":             {},
 		"EXTRACT":         {},
 		"FLOOR":           {},
@@ -1023,7 +1033,7 @@ func validateViewDefinition(definition string) error {
 	}
 
 	for _, token := range unsupported {
-		if strings.Contains(upper, token) {
+		if containsSQLToken(upper, token) {
 			return fmt.Errorf("%w: contains %q", errUnsupportedViewDefinition, token)
 		}
 	}
@@ -1053,7 +1063,7 @@ func validateCheckConstraintDefinition(definition string) error {
 	if !isPortableCheckConstraintDefinition(definition) {
 		upper := strings.ToUpper(sqlForValidation(definition))
 		for _, token := range []string{"TRY_CONVERT(", "TRY_CAST(", "CONVERT(", "CROSS APPLY", "OUTER APPLY", "TOP ", "TOP("} {
-			if strings.Contains(upper, token) {
+			if containsSQLToken(upper, token) {
 				return fmt.Errorf("%w: contains %q", errUnsupportedCheckConstraintDefinition, token)
 			}
 		}
@@ -1069,7 +1079,7 @@ func validateDefaultConstraintDefinition(definition string) error {
 	if !isPortableDefaultConstraintDefinition(definition) {
 		upper := strings.ToUpper(sqlForValidation(definition))
 		for _, token := range []string{"TRY_CONVERT(", "TRY_CAST(", "CONVERT("} {
-			if strings.Contains(upper, token) {
+			if containsSQLToken(upper, token) {
 				return fmt.Errorf("%w: contains %q", errUnsupportedDefaultConstraintDefinition, token)
 			}
 		}
@@ -1079,7 +1089,8 @@ func validateDefaultConstraintDefinition(definition string) error {
 }
 
 func normalizeViewDefinition(view *catalog.View) (string, error) {
-	lines := strings.Split(strings.ReplaceAll(view.Definition, "\r\n", "\n"), "\n")
+	protected := sqlrewrite.Protect(view.Definition, false)
+	lines := strings.Split(strings.ReplaceAll(protected.SQL, "\r\n", "\n"), "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -1100,123 +1111,96 @@ func normalizeViewDefinition(view *catalog.View) (string, error) {
 		columnList = normalized[header[2]:header[3]]
 	}
 	normalized = "CREATE VIEW " + quoteIdentifier(view.Schema) + "." + quoteIdentifier(view.Name) + columnList + " AS" + normalized[header[1]:]
-	normalized = normalizeSQLExpression(normalized)
+	normalized = normalizeSQLExpression(protected.Restore(normalized))
 	return normalized, nil
 }
 
 func normalizeSQLExpression(expression string) string {
-	protected := sqlrewrite.Protect(expression, true)
+	protected := sqlrewrite.ProtectExpression(expression)
 	normalized := protected.SQL
 	normalized = collatePattern.ReplaceAllString(normalized, "")
-	normalized = normalizeBracketIdentifiers(normalized)
-	protectedIdentifiers := sqlrewrite.ProtectIdentifiers(normalized)
-	normalized = protectedIdentifiers.SQL
 	normalized = isNullPattern.ReplaceAllString(normalized, "COALESCE(")
 	normalized = getDatePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = getUTCDatePattern.ReplaceAllString(normalized, "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
 	normalized = getOffsetDatePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = newIDPattern.ReplaceAllString(normalized, "gen_random_uuid()")
-	normalized = lenPattern.ReplaceAllString(normalized, "LENGTH(RTRIM($1))")
 	normalized = dataLengthPattern.ReplaceAllString(normalized, "OCTET_LENGTH(")
-	normalized = charIndexPattern.ReplaceAllString(normalized, "POSITION($1 IN $2)")
-	normalized = iifPattern.ReplaceAllStringFunc(normalized, translateIIF)
-	normalized = stuffPattern.ReplaceAllStringFunc(normalized, translateSTUFF)
-	normalized = dateAddPattern.ReplaceAllStringFunc(normalized, translateDATEADD)
-	normalized = dateDiffPattern.ReplaceAllStringFunc(normalized, translateDATEDIFF)
 	normalized = replicatePattern.ReplaceAllString(normalized, "REPEAT(")
-	normalized = spacePattern.ReplaceAllStringFunc(normalized, translateSPACE)
-	normalized = convertSafePattern.ReplaceAllStringFunc(normalized, translateCONVERTSafe)
-	normalized = logSingleArgPattern.ReplaceAllString(normalized, "LN($1)")
-
-	for {
-		next := castTypePattern.ReplaceAllStringFunc(normalized, translateCAST)
-		if next == normalized {
-			break
-		}
-		normalized = next
-	}
-	return protected.Restore(protectedIdentifiers.Restore(normalized))
+	normalized = sqlrewrite.RewriteCalls(normalized, translateCall)
+	return protected.Restore(normalized)
 }
 
-func normalizeBracketIdentifiers(input string) string {
-	var output strings.Builder
-	output.Grow(len(input))
-
-	for index := 0; index < len(input); {
-		if input[index] != '[' {
-			output.WriteByte(input[index])
-			index++
-			continue
+func translateCall(name string, args []string) (string, bool) {
+	switch name {
+	case "LEN":
+		if len(args) == 1 {
+			return "LENGTH(RTRIM(" + args[0] + "))", true
 		}
-
-		start := index
-		index++
-		var identifier strings.Builder
-		closed := false
-		for index < len(input) {
-			if input[index] != ']' {
-				identifier.WriteByte(input[index])
-				index++
-				continue
+	case "CHARINDEX":
+		if len(args) == 2 {
+			return fmt.Sprintf("POSITION(%s IN %s)", args[0], args[1]), true
+		}
+	case "IIF":
+		if len(args) == 3 {
+			return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", args[0], args[1], args[2]), true
+		}
+	case "STUFF":
+		if len(args) == 4 && unsignedIntegerPattern.MatchString(args[1]) && unsignedIntegerPattern.MatchString(args[2]) {
+			return fmt.Sprintf("OVERLAY(%s PLACING %s FROM %s FOR %s)", args[0], args[3], args[1], args[2]), true
+		}
+	case "DATEADD":
+		if len(args) == 3 {
+			if interval := dateAddInterval(strings.ToLower(args[0])); interval != "" {
+				// SQL Server truncates fractional DATEADD numbers.
+				return fmt.Sprintf("(%s + (TRUNC((%s)::numeric)::double precision * INTERVAL '%s'))", args[2], args[1], interval), true
 			}
-			if index+1 < len(input) && input[index+1] == ']' {
-				identifier.WriteByte(']')
-				index += 2
-				continue
+		}
+	case "DATEDIFF":
+		if len(args) == 3 {
+			if result := translateDATEDIFF(args); result != "" {
+				return result, true
 			}
-			index++
-			closed = true
-			break
 		}
-
-		if !closed {
-			output.WriteString(input[start:])
-			break
+	case "SPACE":
+		if len(args) == 1 {
+			return fmt.Sprintf("REPEAT(' ', %s)", args[0]), true
 		}
-		output.WriteString(quoteIdentifier(identifier.String()))
+	case "LOG":
+		if len(args) == 1 {
+			return "LN(" + args[0] + ")", true
+		}
+	case "CONVERT":
+		if len(args) == 2 {
+			if pgType := mssqlTypeToPG(args[0]); pgType != "" {
+				return fmt.Sprintf("(%s)::%s", args[1], pgType), true
+			}
+		}
+	case "CAST":
+		if len(args) == 1 {
+			// AS belongs to this CAST only when outside nested parentheses.
+			body, depth := args[0], 0
+			for index := 0; index+2 < len(body); index++ {
+				switch body[index] {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+				if index > 0 && depth == 0 && strings.EqualFold(body[index:index+2], "AS") &&
+					strings.ContainsRune(" \t\r\n\f", rune(body[index-1])) &&
+					strings.ContainsRune(" \t\r\n\f", rune(body[index+2])) {
+					if pgType := mssqlTypeToPG(strings.TrimSpace(body[index+2:])); pgType != "" {
+						return fmt.Sprintf("CAST(%s AS %s)", strings.TrimSpace(body[:index]), pgType), true
+					}
+				}
+			}
+		}
 	}
-
-	return output.String()
+	return "", false
 }
 
-func translateIIF(s string) string {
-	m := iifPattern.FindStringSubmatch(s)
-	if len(m) != 4 {
-		return s
-	}
-	return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", strings.TrimSpace(m[1]), strings.TrimSpace(m[2]), strings.TrimSpace(m[3]))
-}
-
-func translateSTUFF(s string) string {
-	m := stuffPattern.FindStringSubmatch(s)
-	if len(m) != 5 {
-		return s
-	}
-	str, start, length, replacement := strings.TrimSpace(m[1]), strings.TrimSpace(m[2]), strings.TrimSpace(m[3]), strings.TrimSpace(m[4])
-	return fmt.Sprintf("OVERLAY(%s PLACING %s FROM %s FOR %s)", str, replacement, start, length)
-}
-
-func translateDATEADD(s string) string {
-	m := dateAddPattern.FindStringSubmatch(s)
-	if len(m) != 4 {
-		return s
-	}
-	unit, n, expr := strings.ToLower(m[1]), strings.TrimSpace(m[2]), strings.TrimSpace(m[3])
-	interval := dateAddInterval(unit)
-	if interval == "" {
-		return s
-	}
-	// SQL Server truncates a fractional DATEADD number; multiplying a
-	// PostgreSQL interval by it directly would retain the fraction.
-	return fmt.Sprintf("(%s + (TRUNC((%s)::numeric)::double precision * INTERVAL '%s'))", expr, n, interval)
-}
-
-func translateDATEDIFF(s string) string {
-	m := dateDiffPattern.FindStringSubmatch(s)
-	if len(m) != 4 {
-		return s
-	}
-	unit, start, end := strings.ToLower(m[1]), strings.TrimSpace(m[2]), strings.TrimSpace(m[3])
+func translateDATEDIFF(args []string) string {
+	unit, start, end := strings.ToLower(args[0]), args[1], args[2]
 	switch unit {
 	case "year", "yy", "yyyy":
 		return fmt.Sprintf("(EXTRACT(YEAR FROM (%s)::date) - EXTRACT(YEAR FROM (%s)::date))::integer", end, start)
@@ -1237,46 +1221,74 @@ func translateDATEDIFF(s string) string {
 	case "millisecond", "ms":
 		return fmt.Sprintf("(EXTRACT(EPOCH FROM (DATE_TRUNC('milliseconds', (%s)::timestamp) - DATE_TRUNC('milliseconds', (%s)::timestamp))) * 1000)::integer", end, start)
 	default:
-		return s
+		return ""
 	}
 }
 
-func translateSPACE(s string) string {
-	m := spacePattern.FindStringSubmatch(s)
-	if len(m) != 2 {
-		return s
+func mssqlTypeToPG(sourceType string) string {
+	parts := castTargetTypePattern.FindStringSubmatch(strings.TrimSpace(sourceType))
+	if parts == nil {
+		return ""
 	}
-	return fmt.Sprintf("REPEAT(' ', %s)", strings.TrimSpace(m[1]))
-}
-
-func translateCONVERTSafe(s string) string {
-	m := convertSafePattern.FindStringSubmatch(s)
-	if len(m) != 3 {
-		return s
+	base, modifier := strings.ToLower(parts[1]), strings.ToLower(parts[2])
+	modifier = strings.Join(strings.Fields(modifier), "")
+	switch base {
+	case "varchar", "nvarchar", "char", "nchar":
+		if modifier == "max" && (base == "varchar" || base == "nvarchar") {
+			return "text"
+		}
+		if modifier == "" {
+			modifier = "30" // SQL Server's default length in CAST/CONVERT.
+		}
+		length, err := strconv.Atoi(modifier)
+		if err != nil || length <= 0 {
+			return ""
+		}
+		if base == "char" || base == "nchar" {
+			return fmt.Sprintf("char(%d)", length)
+		}
+		return fmt.Sprintf("varchar(%d)", length)
+	case "numeric", "decimal":
+		if modifier == "" {
+			modifier = "18,0"
+		}
+		if !numericModifierPattern.MatchString(modifier) {
+			return ""
+		}
+		return "numeric(" + modifier + ")"
+	case "float":
+		if modifier != "" {
+			precision, err := strconv.Atoi(modifier)
+			if err != nil || precision < 1 || precision > 53 {
+				return ""
+			}
+			if precision <= 24 {
+				return "real"
+			}
+		}
+		return "double precision"
+	case "datetime2", "datetimeoffset", "time":
+		targetType := "timestamp"
+		switch base {
+		case "datetimeoffset":
+			targetType = "timestamptz"
+		case "time":
+			targetType = "time"
+		}
+		if modifier == "" {
+			return targetType
+		}
+		precision, err := strconv.Atoi(modifier)
+		if err != nil || precision < 0 || precision > 7 {
+			return ""
+		}
+		return fmt.Sprintf("%s(%d)", targetType, min(precision, 6))
 	}
-	pgType := mssqlTypeToPG(strings.ToLower(strings.TrimSpace(m[1])))
-	if pgType == "" {
-		return s
+	if modifier != "" {
+		return ""
 	}
-	expr := strings.TrimSpace(m[2])
-	return fmt.Sprintf("(%s)::%s", expr, pgType)
-}
-
-func translateCAST(s string) string {
-	m := castTypePattern.FindStringSubmatch(s)
-	if len(m) != 3 {
-		return s
-	}
-	pgType := mssqlTypeToPG(strings.ToLower(strings.TrimSpace(m[2])))
-	if pgType == "" {
-		return s
-	}
-	return fmt.Sprintf("CAST(%s AS %s)", strings.TrimSpace(m[1]), pgType)
-}
-
-func mssqlTypeToPG(t string) string {
-	switch t {
-	case "varchar", "nvarchar", "char", "nchar", "text", "ntext":
+	switch base {
+	case "text", "ntext":
 		return "text"
 	case "integer", "int":
 		return "integer"
@@ -1284,26 +1296,22 @@ func mssqlTypeToPG(t string) string {
 		return "bigint"
 	case "smallint", "tinyint":
 		return "smallint"
-	case "float":
-		return "double precision"
 	case "real":
 		return "real"
 	case "bit":
 		return "boolean"
 	case "date":
 		return "date"
-	case "datetime", "datetime2", "smalldatetime":
+	case "datetime", "smalldatetime":
 		return "timestamp"
-	case "datetimeoffset":
-		return "timestamptz"
 	case "uniqueidentifier":
 		return "uuid"
-	case "money", "smallmoney":
-		return "numeric"
+	case "money":
+		return "numeric(19,4)"
+	case "smallmoney":
+		return "numeric(10,4)"
 	case "sysname":
-		return "text"
-	case "numeric", "decimal":
-		return "numeric"
+		return "varchar(128)"
 	default:
 		return ""
 	}
@@ -1364,7 +1372,7 @@ func isPortableIndexPredicate(predicate string) bool {
 	}
 
 	for _, token := range unsupported {
-		if strings.Contains(upper, token) {
+		if containsSQLToken(upper, token) {
 			return false
 		}
 	}
@@ -1385,7 +1393,7 @@ func isPortableCheckConstraintDefinition(definition string) bool {
 	}
 
 	for _, token := range unsupported {
-		if strings.Contains(upper, token) {
+		if containsSQLToken(upper, token) {
 			return false
 		}
 	}
@@ -1401,7 +1409,7 @@ func isPortableDefaultConstraintDefinition(definition string) bool {
 	}
 
 	for _, token := range unsupported {
-		if strings.Contains(upper, token) {
+		if containsSQLToken(upper, token) {
 			return false
 		}
 	}
@@ -1421,8 +1429,20 @@ func hasOnlyPortableFunctions(sql string) bool {
 	return true
 }
 
+func containsSQLToken(sql, token string) bool {
+	pattern := regexp.QuoteMeta(strings.TrimSpace(token))
+	pattern = strings.ReplaceAll(pattern, " ", `\s+`)
+	pattern = strings.ReplaceAll(pattern, `\(`, `\s*\(`)
+	if strings.HasSuffix(token, " ") {
+		pattern += `\s+`
+	} else if !strings.HasSuffix(token, "(") {
+		pattern += `\b`
+	}
+	return regexp.MustCompile(`\b` + pattern).MatchString(sql)
+}
+
 func sqlForValidation(sql string) string {
-	return sqlrewrite.ProtectIdentifiers(sql).SQL
+	return sqlrewrite.ProtectIdentifiers(sql).Masked()
 }
 
 func quoteIdentifier(identifier string) string {

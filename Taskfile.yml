@@ -30,7 +30,7 @@ tasks:
       - go test -v ./...
 
   lint:
-    desc: Run golangci-lint in a Docker container
+    desc: Run golangci-lint
     cmds:
       - golangci-lint run -v --timeout 5m
 

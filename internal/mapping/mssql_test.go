@@ -134,3 +134,15 @@ func TestMapDefaultMapsDatetimeOffsetToTimestampWithTimeZone(t *testing.T) {
 		t.Fatalf("mapDefault(SYSDATETIMEOFFSET()) = %q, want %q", got, want)
 	}
 }
+
+func TestMapDefaultProtectsLiteralParenthesesAndIdentifiers(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{`((N')'))`, `')'`},
+		{`((N'('))`, `'('`},
+		{`[dbo].[GETDATE]()`, `"dbo"."GETDATE"()`},
+	} {
+		if got := mapDefault(test.input); got != test.want {
+			t.Errorf("mapDefault(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}

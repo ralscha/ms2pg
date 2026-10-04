@@ -16,17 +16,22 @@ type Protected struct {
 }
 
 func Protect(input string, normalizeNationalStrings bool) Protected {
-	return protect(input, normalizeNationalStrings, false)
+	return protect(input, normalizeNationalStrings, false, false)
 }
 
-// ProtectIdentifiers additionally protects double-quoted identifiers. It is
-// intended for validation or for rewrites after bracketed MSSQL identifiers
-// have been converted to PostgreSQL identifiers.
+// ProtectIdentifiers additionally protects double-quoted and bracketed
+// identifiers. It is intended for validation of executable SQL tokens.
 func ProtectIdentifiers(input string) Protected {
-	return protect(input, false, true)
+	return protect(input, false, true, false)
 }
 
-func protect(input string, normalizeNationalStrings bool, protectQuotedIdentifiers bool) Protected {
+// ProtectExpression protects SQL syntax while converting bracketed identifiers
+// to PostgreSQL identifiers and normalizing national string prefixes.
+func ProtectExpression(input string) Protected {
+	return protect(input, true, true, true)
+}
+
+func protect(input string, normalizeNationalStrings bool, protectQuotedIdentifiers bool, normalizeIdentifiers bool) Protected {
 	prefix := "\x00ms2pg_protected_"
 	for strings.Contains(input, prefix) {
 		prefix += "_"
@@ -38,21 +43,37 @@ func protect(input string, normalizeNationalStrings bool, protectQuotedIdentifie
 
 	for index := 0; index < len(input); {
 		start := index
-		if protectQuotedIdentifiers && input[index] == '"' {
+		if input[index] == '"' || input[index] == '[' {
+			delimiter := input[index]
+			closing := delimiter
+			if delimiter == '[' {
+				closing = ']'
+			}
 			index++
+			closed := false
 			for index < len(input) {
-				if input[index] != '"' {
+				if input[index] != closing {
 					index++
 					continue
 				}
 				index++
-				if index < len(input) && input[index] == '"' {
+				if index < len(input) && input[index] == closing {
 					index++
 					continue
 				}
+				closed = true
 				break
 			}
-			protected.add(&output, input[start:index])
+			fragment := input[start:index]
+			if normalizeIdentifiers && delimiter == '[' && closed {
+				name := strings.ReplaceAll(fragment[1:len(fragment)-1], "]]", "]")
+				fragment = `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+			}
+			if protectQuotedIdentifiers {
+				protected.add(&output, fragment)
+			} else {
+				output.WriteString(fragment)
+			}
 			continue
 		}
 
@@ -135,6 +156,16 @@ func protect(input string, normalizeNationalStrings bool, protectQuotedIdentifie
 func (protected Protected) Restore(input string) string {
 	for index, fragment := range protected.fragments {
 		input = strings.ReplaceAll(input, protected.placeholder(index), fragment)
+	}
+	return input
+}
+
+// Masked removes protected contents when checking executable SQL tokens.
+// Whitespace keeps tokens on either side of a comment separate.
+func (protected Protected) Masked() string {
+	input := protected.SQL
+	for index := range protected.fragments {
+		input = strings.ReplaceAll(input, protected.placeholder(index), " ")
 	}
 	return input
 }

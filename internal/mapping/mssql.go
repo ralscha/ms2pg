@@ -117,13 +117,12 @@ func temporalType(baseType string, precision int64) string {
 }
 
 func mapDefault(defaultExpr string) string {
-	trimmed := unwrapOuterParens(strings.TrimSpace(defaultExpr))
-	if trimmed == "" {
+	protected := sqlrewrite.ProtectExpression(strings.TrimSpace(defaultExpr))
+	normalized := unwrapOuterParens(protected.SQL)
+	if normalized == "" {
 		return ""
 	}
 
-	protected := sqlrewrite.Protect(trimmed, true)
-	normalized := protected.SQL
 	normalized = defaultCurrentTimePattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")
 	normalized = defaultCurrentUTCTimePattern.ReplaceAllString(normalized, "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
 	normalized = defaultCurrentOffsetPattern.ReplaceAllString(normalized, "CURRENT_TIMESTAMP")

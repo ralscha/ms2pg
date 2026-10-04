@@ -77,11 +77,13 @@ View, default-expression, and check-constraint translation is selective and base
 - `STUFF()`
 - `REPLICATE()`
 - `SPACE()`
-- safe two-argument `CONVERT()` forms
-- `CAST()` from common MSSQL-specific types
+- safe two-argument `CONVERT()` forms, including nested expressions
+- `CAST()` from common MSSQL-specific types, preserving declared length, precision, and scale
 - single-argument `LOG()`
 
 Rewrites avoid string literals and SQL comments. If a source definition falls outside the supported translation rules, ms2pg returns an explicit error describing the unsupported token or expression.
+
+Supported function calls can be nested, such as `IIF(condition, COALESCE(a, b), fallback)`. String casts without a length use SQL Server's default conversion length of 30; `varchar(max)` and `nvarchar(max)` map to `text`. Multiline string contents are preserved, including lines that resemble batch directives.
 
 `DATALENGTH()` maps to PostgreSQL `OCTET_LENGTH()`, which measures the target encoding. Its result can differ for Unicode strings because SQL Server and PostgreSQL use different encodings.
 
