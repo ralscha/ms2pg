@@ -3,7 +3,7 @@ module ms2pg
 go 1.27.3
 
 require (
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/microsoft/go-mssqldb v1.11.2
 	github.com/testcontainers/testcontainers-go v0.44.0
 )
